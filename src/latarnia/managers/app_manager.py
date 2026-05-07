@@ -7,6 +7,7 @@ Provides the core functionality for managing Latarnia applications.
 
 import json
 import logging
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -676,9 +677,8 @@ class AppManager:
             
             # Install dependencies using pip
             cmd = [
-                sys.executable, "-m", "pip", "install", 
+                sys.executable, "-m", "pip", "install",
                 "-r", str(requirements_file),
-                "--user"  # Install to user directory
             ]
             
             result = subprocess.run(
@@ -729,17 +729,21 @@ class AppManager:
         
         try:
             self.logger.info(f"Running setup commands for app {app_id}")
-            
+            venv_bin = str(Path(sys.executable).parent)
+            env = os.environ.copy()
+            env["PATH"] = venv_bin + os.pathsep + env.get("PATH", "")
+
             for command in app.manifest.install.setup_commands:
                 self.logger.debug(f"Running setup command: {command}")
-                
+
                 result = subprocess.run(
                     command,
                     shell=True,
                     capture_output=True,
                     text=True,
                     cwd=app.path,
-                    timeout=60  # 1 minute timeout per command
+                    env=env,
+                    timeout=300,
                 )
                 
                 if result.returncode != 0:

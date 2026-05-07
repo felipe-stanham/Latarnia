@@ -11,6 +11,7 @@ import logging
 import platform
 import subprocess
 import aiohttp
+import psutil
 from typing import Dict, List, Optional, Callable, Tuple
 from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta
@@ -73,6 +74,7 @@ class HealthCheckConfig:
     timeout: int = 5  # seconds
     max_failures: int = 3
     failure_threshold: int = 2  # consecutive failures before marking as unhealthy
+    startup_grace_period: int = 60  # seconds after start_at before failures count
 
 
 class HealthMonitor:
@@ -156,32 +158,42 @@ class HealthMonitor:
                 await asyncio.sleep(self.config.interval)
     
     async def _perform_health_checks(self):
-        """Perform health checks for all running service apps"""
-        # Get all running service apps
+        """Perform health checks for all running service apps."""
         service_apps = self.app_manager.registry.get_apps_by_type(AppType.SERVICE)
-        running_apps = [app for app in service_apps if app.status == AppStatus.RUNNING]
-        
-        if not running_apps:
+
+        # Include RUNNING apps and ERROR apps whose process is still alive
+        # (the latter allows recovery from transient startup failures).
+        checkable = [
+            app for app in service_apps
+            if (
+                app.status == AppStatus.RUNNING
+                or (app.status == AppStatus.ERROR and self._is_process_alive(app))
+            )
+            and app.manifest.config
+            and app.manifest.config.has_UI
+        ]
+
+        if not checkable:
             return
-        
-        # Perform health checks concurrently
-        tasks = []
-        for app in running_apps:
-            # Check if app has UI endpoint (health check available)
-            if app.manifest.config and app.manifest.config.has_UI:
-                task = asyncio.create_task(self._check_app_health(app.app_id))
-                tasks.append(task)
-        
-        if tasks:
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            # Process results
-            for i, result in enumerate(results):
-                if isinstance(result, Exception):
-                    app_id = running_apps[i].app_id
-                    self.logger.error(f"Health check failed for app {app_id}: {result}")
-                    await self._handle_health_check_failure(app_id, str(result))
+
+        tasks = [asyncio.create_task(self._check_app_health(app.app_id)) for app in checkable]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for app, result in zip(checkable, results):
+            if isinstance(result, Exception):
+                self.logger.error(f"Health check failed for app {app.app_id}: {result}")
+                await self._handle_health_check_failure(app.app_id, str(result))
     
+    def _is_process_alive(self, app) -> bool:
+        """Return True if the app's tracked process is still running."""
+        pid_str = getattr(app.runtime_info, "process_id", None)
+        if not pid_str:
+            return False
+        try:
+            return psutil.pid_exists(int(pid_str))
+        except (ValueError, TypeError):
+            return False
+
     async def _check_app_health(self, app_id: str) -> Optional[HealthCheckResult]:
         """
         Perform health check for a specific app
@@ -231,13 +243,22 @@ class HealthMonitor:
                     # Update tracking
                     self.health_results[app_id] = result
                     self.last_check_times[app_id] = datetime.now()
-                    
+
                     # Reset failure count on successful check
                     if status in [HealthStatus.GOOD, HealthStatus.WARNING]:
                         self.failure_counts[app_id] = 0
+                        # Recover from error state if the process was stuck there
+                        if app.status == AppStatus.ERROR:
+                            self.logger.info("App %s recovered from error state", app_id)
+                            app.runtime_info.error_message = None
+                            self.app_manager.registry.update_app(
+                                app_id,
+                                status=AppStatus.RUNNING,
+                                runtime_info=app.runtime_info,
+                            )
                     else:
                         await self._handle_health_check_failure(app_id, message)
-                    
+
                     # Update app registry with health info
                     app.runtime_info.last_health_check = datetime.now()
                     self.app_manager.registry.update_app(app_id, runtime_info=app.runtime_info)
@@ -324,11 +345,26 @@ class HealthMonitor:
     async def _handle_health_check_failure(self, app_id: str, error_message: str):
         """
         Handle health check failure for an app
-        
+
         Args:
             app_id: Application identifier
             error_message: Error message
         """
+        # Skip counting failures during the startup grace period so transient
+        # connection errors while an app is still initialising don't mark it
+        # as permanently failed.
+        app = self.app_manager.registry.get_app(app_id)
+        if app and app.runtime_info.started_at:
+            elapsed = (datetime.now() - app.runtime_info.started_at).total_seconds()
+            if elapsed < self.config.startup_grace_period:
+                remaining = self.config.startup_grace_period - elapsed
+                self.logger.debug(
+                    "App %s within startup grace period (%.0fs remaining), "
+                    "ignoring failure: %s",
+                    app_id, remaining, error_message,
+                )
+                return
+
         # Increment failure count
         self.failure_counts[app_id] = self.failure_counts.get(app_id, 0) + 1
         
@@ -631,10 +667,15 @@ class HealthMonitor:
         the actionable error.
         """
         app = self.app_manager.registry.get_app(app_id)
-        if app is not None and app.status == AppStatus.ERROR:
-            err_msg = getattr(app.runtime_info, "error_message", None)
-            if err_msg:
-                return {"overall_status": OverallStatus.RED.value, "detail": err_msg}
+        if app is not None:
+            if app.status == AppStatus.ERROR:
+                err_msg = getattr(app.runtime_info, "error_message", None)
+                if err_msg:
+                    return {"overall_status": OverallStatus.RED.value, "detail": err_msg}
+            # On macOS systemd is unavailable, so non-running registry states
+            # must short-circuit before stale health_results produce a false green.
+            if app.status in (AppStatus.STOPPED, AppStatus.DISCOVERED):
+                return {"overall_status": OverallStatus.GREY.value, "detail": "stopped"}
 
         systemd_states = self.get_systemd_states()
         systemd_state = systemd_states.get(app_id) if systemd_states else None

@@ -8,3 +8,4 @@
 - **example-apps-are-fixtures:** `examples/` is the source of truth for example apps (committed). `apps/` is gitignored. Platform changes must update `example_full_app` to exercise the new feature.
 - **mcp-server-config:** MCP servers go in `.mcp.json`, not `settings.json`. User runs `claude-dor` profile. → [memory/mcp-server-config.md](memory/mcp-server-config.md)
 - **scope-branch-naming:** Branch naming uses dashes not slashes: `scope-P-XXXX-N-description` (not `scope/`).
+- **run-local-dev:** `cd /Users/felipestanham/Desktop/MyProjects/HomeHelper && ENV=dev .venv/bin/python -m uvicorn latarnia.main:app --host 0.0.0.0 --port 8000 --app-dir src`

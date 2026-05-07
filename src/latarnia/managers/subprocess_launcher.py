@@ -11,6 +11,7 @@ integration. It exists so that local dev on macOS keeps working.
 import logging
 import os
 import subprocess
+import sys
 import psutil
 from pathlib import Path
 from typing import Optional, Dict, TYPE_CHECKING
@@ -102,7 +103,7 @@ class SubprocessLauncher:
                     return False
 
             # Build arguments
-            cmd = ["python3", str(main_file), "--port", str(port)]
+            cmd = [sys.executable, str(main_file), "--port", str(port)]
 
             # Add MCP port if allocated
             if mcp_port:
