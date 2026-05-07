@@ -116,7 +116,7 @@ class SubprocessLauncher:
 
             # Add data dir if required
             if app.manifest.config.data_dir:
-                data_dir = self.config_manager.get_data_dir(app_id)
+                data_dir = self.config_manager.get_data_dir(app_id).resolve()
                 data_dir.mkdir(parents=True, exist_ok=True)
                 cmd.extend(["--data-dir", str(data_dir)])
 

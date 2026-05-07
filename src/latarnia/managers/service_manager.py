@@ -344,7 +344,7 @@ class ServiceManager:
         # to journald (single canonical sink). The `logs_dir` manifest
         # field is deprecated as of P-0005 Scope 4.
         if app.manifest.config and app.manifest.config.data_dir:
-            data_dir = Path(self.config_manager.get_data_dir()) / app_id
+            data_dir = (Path(self.config_manager.get_data_dir()) / app_id).resolve()
             data_dir.mkdir(parents=True, exist_ok=True)
             cmd_args.extend(["--data-dir", str(data_dir)])
 
