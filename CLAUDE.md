@@ -144,7 +144,7 @@ main (production-ready)
 ### Rules
 
 - Scope branches are created from `dev`. Never branch off another scope branch.
-- One agent per branch when working in parallel. Use `isolation: worktree` in agent definitions or `claude --worktree <name>` to run parallel sessions in isolated git worktrees. Do not manually clone the repo into separate folders.
+- **Parallel sessions** — multiple Claude Code sessions (human-operated or agent-operated) can work simultaneously, one per scope branch. Each session must run in its own git worktree to avoid conflicts. Use `git worktree add <path> <branch>` to create an isolated working directory per scope. Use `isolation: worktree` in agent definitions for sub-agents. Never manually clone the repo into separate folders.
 - **Never commit directly to `main` or `tst`.** Before any `git commit`, verify the current branch. If it is `main` or `tst`, stop and refuse — explain that the change must go to `dev` (or a scope branch) and be promoted via the standard flow.
 - Commit to `dev` only for trivial cross-scope fixes.
 - **Hotfix exception (rare):** Only bypass the promotion flow if the user explicitly uses the word "hotfix" and the change cannot wait for a normal promotion cycle. In that case: (a) acknowledge the exception, (b) apply it to `main` or `tst` as directed, (c) immediately backport to `dev` in the same session. Note the exception in the commit message.
@@ -251,4 +251,4 @@ After completing a scope and passing code review, delegate to the `tester` agent
     - Use `classDiagram` for objects/classes model.
     - Use `erDiagram` for databases.
     - Include field types and key relationships
-- For every schema change, create a migration and rollback script in `docs/System/migrations/`, named `YYYYMMDD_short_description.sql`.
+- `dataModel.md` always reflects the **current** schema. Migrations are project-level implementation artifacts — if a project requires them, manage them within the project's own directory structure, not in `docs/System/`.

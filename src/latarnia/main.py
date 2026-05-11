@@ -1258,22 +1258,30 @@ async def get_app_process_info(app_id: str):
 @app.post("/api/system/restart")
 async def restart_latarnia():
     """Restart Latarnia application"""
-    try:
-        import os
-        import sys
-        
-        logger.info("Latarnia restart requested via API")
-        
-        # Trigger a restart by exiting with a special code
-        # The process supervisor (systemd, launchd, etc.) should restart it
-        # For development, we'll just log it
-        logger.warning("Restart requested - this would restart the application in production")
-        
-        return {"success": True, "message": "Restart initiated"}
-        
-    except Exception as e:
-        logger.error(f"Failed to restart Latarnia: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    import asyncio
+    import os
+    import platform
+    import subprocess
+
+    logger.info("Latarnia restart requested via API")
+
+    if platform.system() != "Linux":
+        logger.warning("Restart requested — no-op on non-Linux platform")
+        return {"success": True, "message": "Restart is a no-op on non-Linux platforms"}
+
+    env = os.environ.get("ENV", "dev").lower()
+    unit = f"latarnia-{env}.service"
+    logger.info("Scheduling restart of platform unit %s", unit)
+
+    async def _restart():
+        await asyncio.sleep(1)
+        try:
+            subprocess.Popen(["sudo", "systemctl", "restart", unit])
+        except Exception as exc:
+            logger.error("Failed to restart platform unit %s: %s", unit, exc)
+
+    asyncio.create_task(_restart())
+    return {"success": True, "message": f"Restart initiated for {unit}"}
 
 
 # Streamlit App Management Endpoints
