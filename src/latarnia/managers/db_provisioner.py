@@ -4,6 +4,7 @@ Database provisioner for Latarnia platform.
 Handles per-app database creation, role management, and migration execution.
 """
 import hashlib
+import json
 import logging
 import secrets
 import time
@@ -64,16 +65,28 @@ class DbProvisioner:
         and returns a connection URL for the app.
         """
         db_name, role_name = self._generate_names(app_name)
-        password = secrets.token_urlsafe(32)
 
-        try:
-            # Create or update role
+        # Use a stable stored password so that platform restarts don't rotate
+        # credentials under already-running app processes.
+        stored = self._load_stored_password(role_name)
+        if stored is not None:
+            password = stored
+            if not self.pg_client.role_exists(role_name):
+                # Role was dropped externally; re-create with the stored password.
+                self.pg_client.create_role(role_name, password)
+                self.logger.warning("Role %s was missing; re-created with stored credentials", role_name)
+            else:
+                self.logger.debug("Role %s: reusing stored credentials", role_name)
+        else:
+            password = secrets.token_urlsafe(32)
             if self.pg_client.role_exists(role_name):
                 self.pg_client.alter_role_password(role_name, password)
-                self.logger.info(f"Role {role_name} already exists, password updated")
+                self.logger.info("Role %s exists but no stored creds; rotated password", role_name)
             else:
                 self.pg_client.create_role(role_name, password)
+            self._store_password(role_name, password)
 
+        try:
             # Create database if needed
             db_is_new = False
             if not self.pg_client.database_exists(db_name):
@@ -267,3 +280,25 @@ class DbProvisioner:
             self.logger.info(f"Cleaned up failed provisioning: {db_name}, {role_name}")
         except Exception as e:
             self.logger.error(f"Cleanup failed for {db_name}/{role_name}: {e}")
+        creds_path = self._get_creds_path(role_name)
+        if creds_path.exists():
+            creds_path.unlink(missing_ok=True)
+
+    def _get_creds_path(self, role_name: str) -> Path:
+        creds_dir = Path(self.config_manager.get_data_dir()) / ".db_credentials"
+        creds_dir.mkdir(parents=True, exist_ok=True)
+        return creds_dir / f"{role_name}.json"
+
+    def _load_stored_password(self, role_name: str) -> Optional[str]:
+        path = self._get_creds_path(role_name)
+        if not path.exists():
+            return None
+        try:
+            return json.loads(path.read_text()).get("password")
+        except Exception:
+            return None
+
+    def _store_password(self, role_name: str, password: str) -> None:
+        path = self._get_creds_path(role_name)
+        path.write_text(json.dumps({"role": role_name, "password": password}))
+        path.chmod(0o600)
