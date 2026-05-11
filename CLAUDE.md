@@ -6,6 +6,7 @@
 1. Read `MEMORY.md` if it exists.
 2. Read `docs/SYSTEM.md` if it exists.
 3. Confirm with one line: "Loaded MEMORY.md ✓ / docs/SYSTEM.md ✓"
+4. Run `git branch --show-current`. If the result is `main` or `tst`, **STOP immediately** and output: "WARNING: current branch is `{branch}` — this is a protected branch. No commits or file edits until you confirm this is a critical hotfix." Do not perform any write operation until the user explicitly authorizes work on the protected branch.
 
 ## System Context
 
@@ -144,8 +145,9 @@ main (production-ready)
 
 - Scope branches are created from `dev`. Never branch off another scope branch.
 - One agent per branch when working in parallel. Use `isolation: worktree` in agent definitions or `claude --worktree <name>` to run parallel sessions in isolated git worktrees. Do not manually clone the repo into separate folders.
-- Never commit directly to `main` or `tst`.
+- **Never commit directly to `main` or `tst`.** Before any `git commit`, verify the current branch. If it is `main` or `tst`, stop and refuse — explain that the change must go to `dev` (or a scope branch) and be promoted via the standard flow.
 - Commit to `dev` only for trivial cross-scope fixes.
+- **Hotfix exception (rare):** Only bypass the promotion flow if the user explicitly uses the word "hotfix" and the change cannot wait for a normal promotion cycle. In that case: (a) acknowledge the exception, (b) apply it to `main` or `tst` as directed, (c) immediately backport to `dev` in the same session. Note the exception in the commit message.
 
 ### Promotion Flow
 
