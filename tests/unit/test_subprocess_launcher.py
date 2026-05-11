@@ -123,10 +123,10 @@ class TestSubprocessLauncher:
         assert launcher.processes["my-service"]["pid"] == 4242
         assert launcher.processes["my-service"]["port"] == 8100
 
-        # Popen called with python3 + main_file + --port 8100
+        # Popen called with venv python + main_file + --port 8100
         call_args, _call_kwargs = mock_popen.call_args
         cmd = call_args[0]
-        assert cmd[0] == "python3"
+        assert cmd[0] == sys.executable
         assert cmd[1].endswith("app.py")
         assert "--port" in cmd
         assert "8100" in cmd
