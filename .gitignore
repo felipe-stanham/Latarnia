@@ -217,6 +217,8 @@ Thumbs.db
 
 # Deployment secrets (connection credentials per target)
 .deploy-secrets
+# Per-environment secrets file (operator-managed, never committed)
+secrets.env
 
 # Latarnia specific
 # Ignore apps directory to allow user-provided sample applications
