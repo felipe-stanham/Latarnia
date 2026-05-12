@@ -380,24 +380,8 @@
     }
     
     let html = '<ul class="list-unstyled mb-0">';
-    activities.forEach(activity => {
-      const timestamp = activity.timestamp || '';
-      const message = activity.message || 'No message';
-      const sender = activity.sender || 'unknown';
-      
-      html += `
-        <li class="mb-2 pb-2 border-bottom">
-          <div class="d-flex justify-content-between align-items-start">
-            <div class="flex-grow-1">
-              <small class="text-muted">${timestamp}</small>
-              <div class="small mt-1">${message}</div>
-            </div>
-            <span class="badge bg-secondary ms-2">${sender}</span>
-          </div>
-        </li>`;
-    });
+    activities.forEach(activity => { html += activityItemHtml(activity); });
     html += '</ul>';
-    
     container.innerHTML = html;
   }
 
@@ -982,7 +966,46 @@
     document.getElementById('serviceUIList').style.display = 'block';
   }
 
+  function activityItemHtml(activity) {
+    const timestamp = activity.timestamp || '';
+    const message = activity.message || 'No message';
+    const sender = activity.sender || 'unknown';
+    return `<li class="mb-2 pb-2 border-bottom">
+      <div class="d-flex justify-content-between align-items-start">
+        <div class="flex-grow-1">
+          <small class="text-muted">${timestamp}</small>
+          <div class="small mt-1">${message}</div>
+        </div>
+        <span class="badge bg-secondary ms-2">${sender}</span>
+      </div>
+    </li>`;
+  }
+
+  function prependActivity(activity) {
+    const container = document.getElementById("hh-recent-activity");
+    let ul = container.querySelector('ul');
+    if (!ul) {
+      container.innerHTML = '<ul class="list-unstyled mb-0"></ul>';
+      ul = container.querySelector('ul');
+    }
+    ul.insertAdjacentHTML('afterbegin', activityItemHtml(activity));
+    // Keep at most 20 items
+    const items = ul.querySelectorAll('li');
+    if (items.length > 20) items[items.length - 1].remove();
+  }
+
+  function connectActivityWebSocket() {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(`${proto}//${location.host}/ws/activity`);
+    ws.onmessage = (event) => {
+      try { prependActivity(JSON.parse(event.data)); } catch (e) { console.error('Activity WS parse error', e); }
+    };
+    ws.onclose = () => setTimeout(connectActivityWebSocket, 3000);
+    ws.onerror = (e) => console.error('Activity WS error', e);
+  }
+
   // Initial load
   refreshDashboard();
+  connectActivityWebSocket();
 </script>
 {% endblock %}
