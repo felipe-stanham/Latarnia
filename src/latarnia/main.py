@@ -6,12 +6,12 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
 from latarnia.core.config import config_manager
 from latarnia.core.redis_client import RedisHealthMonitor
-from latarnia.core.event_subscriber import RedisEventSubscriber
+from latarnia.core.event_subscriber import AsyncStreamConsumer
 from latarnia.utils.system_monitor import SystemMonitor
 from latarnia.web.dashboard import router as dashboard_router
 
@@ -145,9 +145,9 @@ async def lifespan(app: FastAPI):
             ):
                 await mcp_gateway.on_app_started(app_entry.app_id)
 
-    # Start Redis event subscriber
-    logger.info("Starting Redis event subscriber...")
-    event_subscriber.start()
+    # Start Redis stream consumer
+    logger.info("Starting Redis stream consumer...")
+    await event_subscriber.start()
 
     # Start health monitoring. The dashboard's combined `overall_status`
     # (P-0005 cap-005) needs this loop running to refresh /health results.
@@ -164,8 +164,8 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down Latarnia main application")
     logger.info("Stopping health monitor...")
     await health_monitor.stop_monitoring()
-    logger.info("Stopping Redis event subscriber...")
-    event_subscriber.stop()
+    logger.info("Stopping Redis stream consumer...")
+    await event_subscriber.stop()
     logger.info("Stopping all managed service apps...")
     subprocess_launcher.stop_all()
     logger.info("Stopping all Streamlit apps...")
@@ -178,9 +178,9 @@ async def lifespan(app: FastAPI):
 # Initialize components at module level for testing
 system_monitor = SystemMonitor()
 redis_monitor = RedisHealthMonitor(config_manager.get_redis_url())
-event_subscriber = RedisEventSubscriber(
-    config_manager.get_redis_url(), 
-    max_events=config_manager.config.event_subscriber.max_events
+event_subscriber = AsyncStreamConsumer(
+    config_manager.get_redis_url(),
+    max_events=config_manager.config.event_subscriber.max_events,
 )
 
 # Initialize app management components
@@ -838,6 +838,19 @@ async def get_recent_activity(limit: int = 10):
     except Exception as e:
         logger.error(f"Failed to get recent activity: {e}")
         return {"success": True, "data": {"activities": [], "count": 0, "error": str(e)}}
+
+
+@app.websocket("/ws/activity")
+async def activity_websocket(websocket: WebSocket):
+    """WebSocket endpoint for real-time stream activity updates."""
+    await event_subscriber.ws_manager.connect(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        event_subscriber.ws_manager.disconnect(websocket)
+    except Exception:
+        event_subscriber.ws_manager.disconnect(websocket)
 
 
 @app.post("/api/services/{app_id}/enable")
