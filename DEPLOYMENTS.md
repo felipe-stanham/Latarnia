@@ -2,6 +2,7 @@
 
 | Date       | Target     | Env | Branch | Commit  | Notes                                              |
 |------------|------------|-----|--------|---------|----------------------------------------------------|
+| 2026-05-12 | homeserver | tst | tst    | 85a50c7 | Replace pub/sub with async Redis Stream consumer + WebSocket /ws/activity. Regression tests skipped (user instruction). Pi remote URL fixed again (Latarnik→HomeHelper). Smoke: /health good, /dashboard 200, 3 apps, /api/activity/recent 200, WebSocket 101 handshake confirmed. |
 | 2026-04-13 | homeserver | tst | tst    | 24304c1 | P-0003 dynamic MCP port allocation, merged dev->tst |
 | 2026-04-13 | homeserver | prd | main   | 24304c1 | First PRD deployment — full platform (P-0001 + P-0002 + P-0003) |
 | 2026-04-24 | homeserver | tst | tst    | 63b3ea9 | P-0004 env-scoped per-app systemd units + bootstrap docs. Service restart OK, all smoke endpoints green (/ /health /api/apps /api/system/metrics /dashboard). Pre-P-0004 user-scope units confirmed absent before restart. |
