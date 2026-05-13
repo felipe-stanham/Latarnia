@@ -36,6 +36,8 @@ Latarnia is a unified home automation platform for Raspberry Pi 5 (8GB RAM) that
 | P-0004  | Env-Scoped Services | [DONE]      | Env-scope per-app systemd units + bootstrap docs for main platform units |
 | P-0005  | Activate Systemd Per-App | [DONE] | LaunchRouter dispatches Linux→ServiceManager, Darwin→SubprocessLauncher; per-app units use venv Python, Restart=on-failure, ENV= (no PartOf= — independent lifetimes); startup reconciliation claims ports for already-running units; linger warning on startup; `/api/apps` reports combined systemd+`/health` status (green/yellow/red/grey); logs via journald on Linux. |
 | P-0006  | Secret Manager  | [DONE] | Per-env master `secrets.env` (operator-edited, mode 600) → SecretManager filters per-app to declared `requires_secrets` → systemd `EnvironmentFile=-` (Linux) / Popen `env=` (Darwin). Refuse-to-start when missing; `GET /api/secrets` listing (no values); zero secret values in any log. |
+| P-0007  | LiteLLM Gateway | [ ] Not Started | Manifest-driven LiteLLM provisioner: `litellm_gateway: true` in manifest triggers LiteLLM Docker container per app, MASTER_KEY injection via SecretManager, model gate enforcement, health probe integration. |
+| P-0008  | Caddy + Auth    | [ ] Not Started | Replace `web_proxy.py` with Caddy (TLS, forward_auth); TOTP login (no passwords); per-app role model (none/webUI-low/webUI-med/webUI-full/full); JWT machine tokens for API/MCP; `X-Latarnia-App-Role` header injection; `latarnia_platform_{env}` Postgres DB for auth state. |
 
 ## Testing Tools
 
