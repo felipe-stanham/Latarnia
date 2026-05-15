@@ -27,7 +27,7 @@ Replace `web_proxy.py` with Caddy as the single ingress for all Latarnia traffic
 **Caddy Infrastructure**
 - **cap-001:** Caddy installed and running as a systemd service on the Pi
 - **cap-002:** Latarnia generates a Caddyfile (per-environment section) from the app registry; calls `caddy reload` on app registration and deregistration
-- **cap-003:** Caddy terminates TLS using its internal CA (self-signed, browser trust requires one-time CA import on each device)
+- **cap-003:** Caddy terminates TLS using Let's Encrypt (ACME HTTP-01) when a real domain is configured; falls back to self-signed for `localhost` (dev environment only). Domain is read from `{ENV}_DOMAIN` config key — not hardcoded.
 - **cap-004:** Caddy uses `forward_auth` to delegate session validation to Latarnia's `/auth/verify` on all protected routes
 - **cap-005:** App swagger (`/apps/{app}/docs`, `/apps/{app}/openapi.json`) and Latarnia's own `/docs` are routed without auth (public on LAN)
 - **cap-006:** `ufw` firewall rules block all app ports (8000, 8100–8199, 9001–9099) from external hosts; only Caddy's ports (443 PRD, 8443 TST) are open
@@ -70,16 +70,17 @@ Replace `web_proxy.py` with Caddy as the single ingress for all Latarnia traffic
 - Stopping and deregistering the app causes a reload; the route returns 404
 
 ### cap-003
-- Browser connects to `https://latarnia.local` with TLS; certificate is issued by Caddy's internal CA
+- Browser connects to `https://{PRD_DOMAIN}` with TLS; certificate is issued by Let's Encrypt (no browser trust import required)
 - HTTP requests to port 80 are redirected to HTTPS
+- Dev environment (`localhost`) uses Caddy's automatic self-signed cert
 
 ### cap-004
 - Unauthenticated `GET /` redirects to `/auth/login`
 - Unauthenticated `GET /apps/{app}/` redirects to `/auth/login`
 
 ### cap-005
-- `curl -k https://latarnia.local/apps/{app}/docs` returns 200 without a session cookie
-- `curl -k https://latarnia.local/docs` returns 200 without a session cookie
+- `curl https://{PRD_DOMAIN}/apps/{app}/docs` returns 200 without a session cookie
+- `curl https://{PRD_DOMAIN}/docs` returns 200 without a session cookie
 
 ### cap-007
 - `web_proxy.py` file does not exist in the codebase
@@ -157,15 +158,18 @@ See `workflows.md#flow-05`
 - **TOTP secret encryption:** AES-256-GCM using `LATARNIA_TOTP_ENC_KEY` (32-byte base64 key stored in `secrets.env`). Key is loaded into memory at startup; plaintext secret is never written to disk or logged.
 - **JWT signing:** HS256 with `LATARNIA_JWT_SECRET` from `secrets.env`. JWTs contain: `sub` (user_id), `iat`, `exp`, `apps` (dict of app_name → role), `super` (bool).
 - **Session cookie:** `latarnia_session=<opaque_token>` — the token is a random UUID stored hashed (SHA-256) in the sessions table. Not a JWT — opaque by design to allow server-side revocation.
+- **Domain configuration:** Domain is not hardcoded. `CaddyConfigManager.generate_config()` reads `{ENV}_DOMAIN` from the platform config (e.g., `PRD_DOMAIN=home.stanham.com`). If the domain is `localhost` or empty, Caddy uses its automatic self-signed cert (dev). If the domain is a real hostname, Caddy provisions a Let's Encrypt cert automatically via ACME HTTP-01. No `tls` directive is needed in the Caddyfile — Caddy infers the appropriate method from the site address.
+- **ACME HTTP-01:** Port 80 must be reachable from the internet for the ACME challenge. `ufw` must allow port 80/tcp. Caddy handles the challenge listener and renewal automatically.
 - **Caddyfile management:** Latarnia writes `/opt/latarnia/{env}/caddy/latarnia.caddyfile`. The system Caddyfile `import`s it. On reload, Latarnia calls the Caddy admin API. On startup, Latarnia generates the file and reloads.
-- **Multi-env Caddy:** PRD listens on `*:443`, TST listens on `*:8443`. Both are sections in the same Caddyfile. Each Latarnia env manages its own section via its own generated include file.
+- **Multi-env Caddy:** PRD uses `{PRD_DOMAIN}:443`, TST uses `{TST_DOMAIN}:8443`. Both can point to the same physical domain (same cert, different ports). Each Latarnia env manages its own section via its own generated include file.
 - **Platform DB:** `latarnia_platform_{env}` (e.g., `latarnia_platform_prd`). Created by Latarnia at startup using the platform's admin Postgres credentials (same as used by `db_provisioner.py`). Auth schema migrations live in `src/latarnia/auth/migrations/`.
 - **Caddy version:** Caddy 2.x (current stable). Installed via official Debian repo, not snap. Managed as a systemd service.
 
 ## Risks, Rabbit Holes & Open Questions
 
 ### Risks
-- **Browser CA trust:** Caddy's internal CA cert must be imported on each browser/device. This is a one-time step but non-obvious for non-technical household members.
+- **ACME HTTP-01 requires port 80 open:** The router/firewall must forward port 80 to the Pi for Let's Encrypt challenges. Caddy handles the challenge listener automatically; operator must verify the port forward exists. On VPS deployments, the provider's firewall must also allow port 80.
+- **Dynamic IP / DNS propagation:** ACME challenges resolve against the configured domain. If the dynamic DNS record is stale or propagating, cert provisioning fails on first startup. Caddy will retry automatically.
 - **TOTP clock drift:** Pi's system clock must be NTP-synced. If clock drifts > 30s, TOTP validation fails. Ensure `timedatectl` shows NTP sync active.
 - **Caddy reload race:** If Latarnia reloads Caddy while an app is registering, config could be stale. Serialize Caddy config writes with a lock.
 - **Session on Pi restart:** Sessions in DB survive Pi restarts (no TTL loss). Caddy restarts also safe (stateless).
@@ -206,6 +210,6 @@ See `workflows.md#flow-05`
 - Per-endpoint role granularity (apps own this)
 - Rate limiting (future scope)
 - Audit log (future scope)
-- Certificate management beyond internal CA (no Let's Encrypt — home LAN)
+- CertBot or any external cert manager — Caddy handles ACME natively
 - Streamlit app auth (inherits Caddy session transparently)
 - Cross-host routing
