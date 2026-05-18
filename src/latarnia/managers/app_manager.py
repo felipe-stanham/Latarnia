@@ -815,6 +815,10 @@ class AppManager:
 
         return self.registry.unregister_app(app_id)
 
+    def get_orphaned_apps(self) -> List['AppRegistryEntry']:
+        """Return registered apps whose app directory no longer exists on disk."""
+        return [app for app in self.registry.get_all_apps() if not app.path.exists()]
+
     def get_app_statistics(self) -> dict:
         """Get application statistics"""
         all_apps = self.registry.get_all_apps()

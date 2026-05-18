@@ -538,22 +538,25 @@
             </div>
           </div>` : ''}
 
-          <div class="col-12 text-end">
-            <button class="btn btn-outline-secondary" onclick="viewAppLogs('${app.app_id}', '${app.name}')">View Logs</button>
-            ${app.type === 'streamlit' ? `
-              <button class="btn btn-primary" onclick="launchStreamlitApp('${app.app_id}', '${app.name}')">🚀 Launch Streamlit</button>
-            ` : ''}
-            ${app.manifest?.config?.has_web_ui ? `
-              <a class="btn btn-primary" href="/apps/${app.name}/" target="_blank">Web UI</a>
-            ` : ''}
-            ${app.type === 'service' && app.manifest?.config?.has_UI ? `
-              <button class="btn btn-outline-primary" onclick="viewServiceUI('${app.app_id}', '${app.name}')">View UI</button>
-            ` : ''}
-            ${app.type === 'service' ? `
-              <button class="btn btn-outline-success" onclick="startApp('${app.app_id}')">Start</button>
-              <button class="btn btn-outline-warning" onclick="stopApp('${app.app_id}')">Stop</button>
-              <button class="btn btn-outline-info" onclick="restartApp('${app.app_id}')">Restart</button>
-            ` : ''}
+          <div class="col-12 d-flex justify-content-between align-items-center flex-wrap gap-2">
+            <button class="btn btn-outline-danger" onclick="deleteApp('${app.app_id}', '${app.name}')">Delete App</button>
+            <div class="d-flex gap-2 flex-wrap justify-content-end">
+              <button class="btn btn-outline-secondary" onclick="viewAppLogs('${app.app_id}', '${app.name}')">View Logs</button>
+              ${app.type === 'streamlit' ? `
+                <button class="btn btn-primary" onclick="launchStreamlitApp('${app.app_id}', '${app.name}')">🚀 Launch Streamlit</button>
+              ` : ''}
+              ${app.manifest?.config?.has_web_ui ? `
+                <a class="btn btn-primary" href="/apps/${app.name}/" target="_blank">Web UI</a>
+              ` : ''}
+              ${app.type === 'service' && app.manifest?.config?.has_UI ? `
+                <button class="btn btn-outline-primary" onclick="viewServiceUI('${app.app_id}', '${app.name}')">View UI</button>
+              ` : ''}
+              ${app.type === 'service' ? `
+                <button class="btn btn-outline-success" onclick="startApp('${app.app_id}')">Start</button>
+                <button class="btn btn-outline-warning" onclick="stopApp('${app.app_id}')">Stop</button>
+                <button class="btn btn-outline-info" onclick="restartApp('${app.app_id}')">Restart</button>
+              ` : ''}
+            </div>
           </div>
         </div>
       `;
@@ -561,7 +564,23 @@
       content.innerHTML = `<div class="alert alert-danger">Failed to load app details: ${err.message}</div>`;
     }
   }
-  
+
+  async function deleteApp(appId, appName) {
+    const confirmed = confirm(
+      `Delete "${appName}"?\n\nThis will:\n• Stop the running service\n• Remove the systemd unit\n• Delete the app folder from apps/\n\nThe data directory and database are NOT deleted.\n\nThis cannot be undone.`
+    );
+    if (!confirmed) return;
+    try {
+      const response = await fetch(`/api/apps/${appId}?delete_folder=true`, { method: 'DELETE' });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Delete failed');
+      bootstrap.Modal.getInstance(document.getElementById('appDetailsModal'))?.hide();
+      await refreshDashboard();
+    } catch (err) {
+      alert(`Failed to delete app: ${err.message}`);
+    }
+  }
+
   // Log viewer modal
   let currentLogAppId = null;
   let currentLogAppName = null;

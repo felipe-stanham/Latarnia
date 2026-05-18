@@ -6,6 +6,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
+import shutil
+
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
@@ -98,6 +100,11 @@ async def lifespan(app: FastAPI):
     logger.info("Discovering applications...")
     discovered_count = app_manager.discover_apps()
     logger.info(f"Discovered {discovered_count} applications")
+
+    # Clean up apps whose folders were deleted since last run
+    orphan_count = await _cleanup_orphaned_apps()
+    if orphan_count:
+        logger.info("Cleaned up %d orphaned app(s) on startup", orphan_count)
 
     # Reconcile the registry with surviving per-app systemd units (Linux
     # only). Per-app units have independent lifetimes, so they typically
@@ -256,6 +263,33 @@ app.include_router(dashboard_router)
 app.include_router(web_proxy_router)
 
 
+async def _cleanup_orphaned_apps() -> int:
+    """Stop, remove units, and unregister apps whose app folder has been deleted."""
+    orphans = app_manager.get_orphaned_apps()
+    count = 0
+    for app_entry in orphans:
+        logger.warning(
+            "Orphaned app detected: %s (path %s missing) — cleaning up",
+            app_entry.app_id, app_entry.path,
+        )
+        try:
+            if app_entry.type == AppType.SERVICE:
+                pick_launcher(app_entry).stop_service(app_entry.app_id)
+            else:
+                streamlit_manager.stop_streamlit_app(app_entry.app_id)
+        except Exception as exc:
+            logger.warning("Could not stop orphaned app %s: %s", app_entry.app_id, exc)
+        service_manager.remove_service(app_entry.app_id)
+        if app_entry.runtime_info.assigned_port:
+            port_manager.release_port(app_entry.app_id)
+        if app_entry.mcp_info and app_entry.mcp_info.mcp_port:
+            port_manager.release_mcp_port(app_entry.app_id)
+        app_manager.unregister_app(app_entry.app_id)
+        count += 1
+        logger.info("Cleaned up orphaned app: %s", app_entry.app_id)
+    return count
+
+
 @app.get("/")
 async def root():
     """Root endpoint"""
@@ -382,12 +416,14 @@ async def get_config():
 
 @app.post("/api/apps/discover")
 async def discover_apps():
-    """Discover applications in the apps directory"""
+    """Discover new applications and clean up orphaned ones."""
     try:
         count = app_manager.discover_apps()
+        orphan_count = await _cleanup_orphaned_apps()
         return {
             "discovered_count": count,
-            "message": f"Discovered {count} new applications"
+            "orphans_cleaned": orphan_count,
+            "message": f"Discovered {count} new application(s), cleaned {orphan_count} orphaned app(s)",
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -502,25 +538,58 @@ async def prepare_app(app_id: str):
 
 
 @app.delete("/api/apps/{app_id}")
-async def unregister_app(app_id: str):
-    """Unregister an application"""
+async def delete_app(app_id: str, delete_folder: bool = False):
+    """Stop, remove systemd unit, release ports, unregister, and optionally delete folder.
+
+    Query params:
+      delete_folder: if true, deletes the app's folder from the apps/ directory.
+                     The data directory and Postgres database are NOT touched.
+    """
     try:
         app = app_manager.registry.get_app(app_id)
         if not app:
             raise HTTPException(status_code=404, detail=f"App {app_id} not found")
-        
-        # Release port if allocated
+
+        app_path = app.path  # capture before unregistering
+
+        # Stop service; tolerate errors (app may already be stopped)
+        try:
+            if app.type == AppType.SERVICE:
+                pick_launcher(app).stop_service(app_id)
+            else:
+                streamlit_manager.stop_streamlit_app(app_id)
+        except Exception as exc:
+            logger.warning("Could not stop app %s during delete: %s", app_id, exc)
+
+        # Remove systemd unit (stop + disable + unlink unit file)
+        service_manager.remove_service(app_id)
+
+        # Release ports
         if app.runtime_info.assigned_port:
             port_manager.release_port(app_id)
+        if app.mcp_info and app.mcp_info.mcp_port:
+            port_manager.release_mcp_port(app_id)
 
-        success = app_manager.unregister_app(app_id)
-        if success:
-            return {
-                "success": True,
-                "message": f"App {app_id} unregistered successfully"
-            }
-        else:
+        # Unregister (also cleans up Redis stream consumer groups)
+        if not app_manager.unregister_app(app_id):
             raise HTTPException(status_code=500, detail=f"Failed to unregister app {app_id}")
+
+        # Optionally delete the app folder; log a warning if it fails — the app
+        # is already fully unregistered at this point so the delete is best-effort.
+        folder_deleted = False
+        if delete_folder and app_path.exists():
+            try:
+                shutil.rmtree(app_path)
+                folder_deleted = True
+                logger.info("Deleted app folder: %s", app_path)
+            except OSError as exc:
+                logger.warning("Could not delete app folder %s: %s", app_path, exc)
+
+        return {
+            "success": True,
+            "message": f"App {app_id} deleted successfully",
+            "folder_deleted": folder_deleted,
+        }
     except HTTPException:
         raise
     except Exception as e:
