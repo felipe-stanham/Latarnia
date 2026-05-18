@@ -177,8 +177,19 @@ async def proxy_http(request: Request, app_name: str, path: str):
         if k.lower() not in excluded_headers
     }
 
+    content = response.content
+    content_type = response.headers.get("content-type", "")
+    # FastAPI's Swagger UI HTML references /openapi.json as an absolute path.
+    # Rewrite it so the browser fetches the app's schema through the proxy.
+    if "text/html" in content_type and path in ("docs", "redoc"):
+        content = content.replace(
+            b'"/openapi.json"',
+            f'"/apps/{app_name}/openapi.json"'.encode(),
+        )
+        response_headers.pop("content-length", None)
+
     return Response(
-        content=response.content,
+        content=content,
         status_code=response.status_code,
         headers=response_headers,
     )
