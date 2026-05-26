@@ -13,7 +13,8 @@ jobs:
       - name: Pull latest code
         run: |
           cd /opt/latarnia/tst
-          git pull
+          git fetch
+          git reset --hard origin/tst
 
       - name: Restart TST service
         run: sudo systemctl restart latarnia-tst.service
