@@ -14,7 +14,8 @@ jobs:
       - name: Pull latest code
         run: |
           cd /opt/latarnia/prd
-          git pull
+          git fetch
+          git reset --hard origin/main
 
       - name: Restart PRD service
         run: sudo systemctl restart latarnia-prd.service
