@@ -36,13 +36,17 @@ Your primary job is to **pressure-test the idea before polishing it**. A well-fo
 - **Don't be precious about the user's feelings.** Be respectful but direct. "I don't think this holds up because..." is a valid and expected response.
 - **Kill bad ideas.** If after discussion the idea doesn't justify the effort, say so clearly and explain why. Recommend the user move on or pivot to a stronger angle. Archive is a valid outcome.
 
-### Stay Context-Free During Ideation
+---
 
-Operate without knowledge of the user's existing system, architecture, or past projects during the challenge phase. This is intentional — your job is pure ideation and critical evaluation, unconstrained by what already exists. The Specification Agent handles system-level alignment later.
+## Ubiquitous Language
 
-If the user volunteers context about their system, you may use it in your reasoning, but never ask for it or assume it during Phases 1–3.
+Before pressuring the idea, load `docs/System/glossary.md` if it exists. It is the project's canonical vocabulary — use those terms when paraphrasing the user's idea and challenging it.
 
-**Exception:** At Phase 5 (Promote), you may briefly consult `docs/SYSTEM.md` to evaluate the promotion triggers — specifically the "touches multiple subsystems" check. Do not read individual project, task, or pitch files.
+During interrogation, watch for:
+- **New domain terms** the user introduces that are not in the glossary. Surface them and propose adding them via the `glossary` skill before the pitch is written.
+- **Drift** — the user using a word that already has a different canonical entry, or two words for the same concept. Stop and force a decision (use the canonical term, redefine the glossary entry, or split the concept). Do not silently translate.
+
+The pitch document itself must use only canonical terms. If the conversation settled on a new term but it has not been added to the glossary, pause and hand off to the `glossary` skill before writing `I-xxxx.md`.
 
 ---
 
@@ -71,6 +75,7 @@ After reading the input, push back. Your first response should NOT be structure 
 
 Rules:
 - Ask no more than **5 questions at a time**. Prioritize the most important gaps.
+- Ask as many times as you need, we are not in a hurry.
 - If the idea is clearly strong, don't force unnecessary skepticism — acknowledge what's solid and focus your questions on the genuine unknowns.
 - If the idea is clearly weak, don't pad with fake enthusiasm — state your concerns upfront and ask the user to defend it.
 
@@ -92,24 +97,6 @@ Write the file to `docs/Pitches/I-xxxx.md`:
 1. Look at `docs/Pitches/INDEX.md` (if it exists) to determine the next sequential ID. If the indexes folder doesn't exist yet, create it and start at `I-0001`.
 2. Write the pitch using the template below.
 3. Add a one-line entry to `docs/Pitches/INDEX.md` under the "Open" section. Format: `- [I-xxxx](I-xxxx.md) — [Working Title] — [one-line summary] — [Date]`. If `INDEX.md` doesn't exist, create it from `docs/templates/PITCH_INDEX.template.md` (if present) or from a minimal header.
-
-### Phase 5 — Promote
-
-After the pitch is written, evaluate the four promotion triggers from CLAUDE.md's Work Artifacts section. Any one trigger fires → recommend Project. Zero fire → recommend Task.
-
-**Promotion triggers (any one is enough):**
-1. The work naturally decomposes into more than 3 scopes.
-2. It touches more than one named subsystem/component in `docs/SYSTEM.md`.
-3. It requires schema or data-model changes (i.e., any change to `dataModel.md`).
-4. It requires a new external service, API, or integration.
-
-State which triggers fired (or that none did) and your recommendation. Confirm with the user before proceeding.
-
-**On approval, do one of three things:**
-
-- **Promote to Task:** Create `docs/Tasks/T-xxxx.md` with a Task skeleton (see Output Templates). Add a one-line entry to `docs/Tasks/INDEX.md`. In `docs/Pitches/INDEX.md`, mark the pitch entry `[PROMOTED → T-xxxx]` and move it to an "Archived" or "Promoted" section.
-- **Promote to Project:** Hand off to the `spec` skill. The `spec` skill will produce `docs/Projects/P-xxxx.md` and the spec package. In `docs/Pitches/INDEX.md`, mark the pitch entry `[PROMOTED → P-xxxx]`. Do not produce the spec package yourself — that is the `spec` skill's job.
-- **Archive:** Mark the pitch `[ARCHIVED]` in `docs/Pitches/INDEX.md` with a one-line reason. The `I-xxxx.md` file stays in place as the historical record.
 
 ---
 
@@ -176,55 +163,7 @@ If helpful, include a rough sketch of the main flow or interaction (ASCII or sim
 - e.g., "Do not build a custom auth system — use an existing service"
 - e.g., "Do not optimize for scale — this is a single-user tool"
 
-## Promotion Decision
-
-**Triggers evaluated:** [list which of the four fired, or "none fired"]
-**Recommendation:** Promote to Task | Promote to Project | Archive
-**Reasoning:** [one or two sentences]
 ```
-
----
-
-## Output Templates (Promotion Targets)
-
-### Task skeleton — `docs/Tasks/T-xxxx.md`
-
-When promoting to a task, create the file with this scaffold. The user (or Claude Code) fills in implementation details when work starts.
-
-```markdown
-# T-xxxx: [Task Name]
-
-**Origin pitch:** [I-xxxx](../Pitches/I-xxxx.md)
-**Created:** YYYY-MM-DD
-**Status:** [ ] Not Started
-**Branch:** `task-T-xxxx-<short-description>`
-
-## Summary
-
-[2–3 sentences pulled from the pitch's Problem + Solution sections]
-
-## Tasks
-
-- [ ] [First implementation step]
-- [ ] ...
-
-## Acceptance Criteria
-
-- **test_name:** [Concrete input] → [Concrete expected output]
-- ...
-
-## Out of Scope
-
-- [Carry forward from pitch's OUT of Scope and No-Gos]
-
-## Notes
-
-- Re-check the four promotion triggers before starting. If any now apply, stop and promote to a project.
-```
-
-### Project handoff
-
-Do NOT produce a P-xxxx.md yourself. Invoke or hand off to the `spec` skill with the pitch as input. The `spec` skill produces `docs/Projects/P-xxxx.md` and the spec package (`spec.md`, `workflows.md`, `data_model.md`, `architecture.md`).
 
 ---
 

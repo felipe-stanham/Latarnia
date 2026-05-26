@@ -1,4 +1,4 @@
-<!-- TEMPLATE VERSION: 0.1.0 -->
+<!-- TEMPLATE VERSION: 0.2.0 -->
 <!-- DO NOT EDIT — managed by ClaudeCodeTemplate -->
 <!-- Project-specific instructions go in docs/SYSTEM.md -->
 
@@ -9,9 +9,10 @@
 **ALWAYS do this before anything else, regardless of task complexity:**
 1. Read `MEMORY.md` if it exists.
 2. Read `docs/SYSTEM.md` if it exists.
-3. Confirm with one line: "Loaded MEMORY.md ✓ / docs/SYSTEM.md ✓"
-4. Do NOT read the artifact indexes (`docs/Pitches/INDEX.md`, `docs/Tasks/INDEX.md`, `docs/Projects/INDEX.md`) or any P/T/I file at startup. Load these only when the user asks to see open work or names a specific artifact.
-5. Run `git branch --show-current`. If the result is `main` or `tst`, **STOP immediately** and output: "WARNING: current branch is `{branch}` — this is a protected branch. No commits or file edits until you confirm this is a critical hotfix." Do not perform any write operation until the user explicitly authorizes work on the protected branch.
+3. Read `docs/System/glossary.md` if it exists — this is the project's Ubiquitous Language. Every artifact and conversation must use its canonical terms.
+4. Confirm with one line: "Loaded MEMORY.md ✓ / docs/SYSTEM.md ✓ / glossary.md ✓"
+5. Do NOT read the artifact indexes (`docs/Pitches/INDEX.md`, `docs/Tasks/INDEX.md`, `docs/Projects/INDEX.md`) or any P/T/I file at startup. Load these only when the user asks to see open work or names a specific artifact.
+6. Run `git branch --show-current`. If the result is `main` or `tst`, **STOP immediately** and output: "WARNING: current branch is `{branch}` — this is a protected branch. No commits or file edits until you confirm this is a critical hotfix." Do not perform any write operation until the user explicitly authorizes work on the protected branch.
 
 ## System Context
 
@@ -30,6 +31,14 @@
 - Never load individual project, task, or pitch files unless the user specifies which one to work on. Never load the indexes at session startup — load them only when the user asks "what's open" or to pick something to work on.
 - When a project's final scope is marked `[DONE]`, update its entry in `docs/Projects/INDEX.md` to reflect completed status.
 - If creating a new docs/SYSTEM.md or INDEX files, use templates at `docs/templates/`.
+
+## Ubiquitous Language
+
+- `docs/System/glossary.md` is the project's **Ubiquitous Language** — the canonical glossary of domain and system terms. It is always loaded at session startup.
+- Use only the terms defined there in pitches, specs, code, commits, and conversation. Do not silently substitute synonyms — drift between speech and code is the bug this file exists to prevent.
+- To add, edit, or remove a term — or to challenge terminology drift between artifacts — invoke the `glossary` skill. Do not edit `docs/System/glossary.md` by hand.
+- If the user introduces a new domain word that isn't in the glossary, stop and propose adding it via the `glossary` skill before using it in any artifact.
+- If creating a new `docs/System/glossary.md`, use the template at `docs/templates/GLOSSARY.template.md`.
 
 ## Git Ignore
 
