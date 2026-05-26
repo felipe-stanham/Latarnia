@@ -1,0 +1,26 @@
+name: Deploy to PRD
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    name: Deploy to homeserver (prd)
+    runs-on: self-hosted
+    environment: production
+
+    steps:
+      - name: Pull latest code
+        run: |
+          cd /opt/latarnia/prd
+          git pull
+
+      - name: Restart PRD service
+        run: sudo systemctl restart latarnia-prd.service
+
+      - name: Wait for service to start
+        run: sleep 5
+
+      - name: Verify service is active
+        run: systemctl is-active latarnia-prd.service

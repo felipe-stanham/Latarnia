@@ -1,0 +1,25 @@
+name: Deploy to TST
+
+on:
+  push:
+    branches: [tst]
+
+jobs:
+  deploy:
+    name: Deploy to homeserver (tst)
+    runs-on: self-hosted
+
+    steps:
+      - name: Pull latest code
+        run: |
+          cd /opt/latarnia/tst
+          git pull
+
+      - name: Restart TST service
+        run: sudo systemctl restart latarnia-tst.service
+
+      - name: Wait for service to start
+        run: sleep 5
+
+      - name: Verify service is active
+        run: systemctl is-active latarnia-tst.service

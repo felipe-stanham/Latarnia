@@ -8,5 +8,5 @@
 - **example-apps-are-fixtures:** `examples/` is the source of truth for example apps (committed). `apps/` is gitignored. Platform changes must update `example_full_app` to exercise the new feature.
 - **mcp-server-config:** MCP servers go in `.mcp.json`, not `settings.json`. User runs `claude-dor` profile. → [memory/mcp-server-config.md](memory/mcp-server-config.md)
 - **scope-branch-naming:** Branch naming uses dashes not slashes: `scope-P-XXXX-N-description` (not `scope/`).
-- **run-local-dev:** `cd /Users/felipestanham/Desktop/MyProjects/HomeHelper && ENV=dev .venv/bin/python -m uvicorn latarnia.main:app --host 0.0.0.0 --port 8000 --app-dir src`
-- **pi-remote-reverts:** The Pi's `/opt/latarnia/tst` git remote keeps reverting to `https://github.com/felipe-stanham/Latarnik` (old repo name). Fix with: `ssh -i ~/.ssh/homeserver felipe@192.168.68.100 "cd /opt/latarnia/tst && git remote set-url origin https://github.com/felipe-stanham/HomeHelper.git"`. Happens because rsync doesn't touch `.git/config`, so the stale remote survives deploys.
+- **run-local-dev:** `cd /Users/felipestanham/Desktop/MyProjects/Latarnia && ENV=dev .venv/bin/python -m uvicorn latarnia.main:app --host 0.0.0.0 --port 8000 --app-dir src`
+- **pi-remote-reverts:** The Pi's `/opt/latarnia/tst` git remote keeps reverting to an old repo name. Fix with: `ssh -i ~/.ssh/homeserver felipe@192.168.68.100 "cd /opt/latarnia/tst && git remote set-url origin https://github.com/felipe-stanham/Latarnia.git"`. Happens because rsync doesn't touch `.git/config`, so the stale remote survives deploys.
