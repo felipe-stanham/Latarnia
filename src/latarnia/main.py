@@ -62,24 +62,31 @@ async def lifespan(app: FastAPI):
             import subprocess
             import platform
             if platform.system() == "Darwin":  # macOS
-                subprocess.run(["brew", "services", "start", "redis"], 
+                subprocess.run(["brew", "services", "start", "redis"],
                              capture_output=True, check=False)
                 logger.info("Started Redis via brew services")
             else:  # Linux
-                subprocess.run(["sudo", "systemctl", "start", "redis"], 
+                subprocess.run(["sudo", "systemctl", "start", "redis"],
                              capture_output=True, check=False)
                 logger.info("Started Redis via systemctl")
         except Exception as e:
             logger.error(f"Failed to auto-start Redis: {e}")
     else:
         logger.info("Redis is already running")
-    
+
+    # Re-check Redis after potential auto-start attempt
+    redis_status = redis_monitor.get_redis_metrics()
+    redis_ok = redis_status.get("status") == "connected"
+    if not redis_ok:
+        logger.warning("Redis is not reachable — app auto-start will be skipped")
+
     # Check Postgres connectivity
     logger.info("Checking Postgres connectivity...")
-    if pg_client.check_connectivity():
+    pg_ok = pg_client.check_connectivity()
+    if pg_ok:
         logger.info("Postgres is reachable")
     else:
-        logger.warning("Postgres is not reachable — apps with database:true will fail to provision")
+        logger.warning("Postgres is not reachable — app auto-start will be skipped")
 
     # Linger check: per-app user units only survive logout when linger is on.
     # Warn loudly but do not block startup — the main platform itself runs as
@@ -118,6 +125,8 @@ async def lifespan(app: FastAPI):
     # per-app (OS, type) by pick_launcher: Linux+service → systemd, Darwin →
     # subprocess fallback. Apps already RUNNING (reconciled above) are
     # skipped — their unit/process is already up.
+    # Per-app infra guard: skip apps whose declared service requirements
+    # (redis_required, database) cannot be satisfied right now.
     logger.info("Auto-starting service apps...")
     auto_start_count = 0
     for app_entry in app_manager.registry.get_all_apps():
@@ -125,6 +134,18 @@ async def lifespan(app: FastAPI):
             continue
         if app_entry.status == AppStatus.RUNNING:
             logger.info(f"Skipping auto-start of {app_entry.name}: already running (reconciled)")
+            continue
+        if not redis_ok and app_entry.manifest.config.redis_required:
+            logger.warning(
+                "Skipping auto-start of %s: Redis not reachable and app declares redis_required",
+                app_entry.name,
+            )
+            continue
+        if not pg_ok and app_entry.manifest.config.database:
+            logger.warning(
+                "Skipping auto-start of %s: Postgres not reachable and app declares database",
+                app_entry.name,
+            )
             continue
         logger.info(f"Auto-starting service app: {app_entry.name} ({app_entry.app_id})")
         launcher = pick_launcher(app_entry)
@@ -305,11 +326,12 @@ async def health_check():
         # Get system metrics
         hardware_metrics = system_monitor.get_hardware_metrics()
         redis_metrics = redis_monitor.get_redis_metrics()
-        
+        pg_metrics = pg_client.get_postgres_metrics()
+
         # Determine overall health
         health_status = "good"
         issues = []
-        
+
         # Check hardware thresholds
         if "error" in hardware_metrics:
             health_status = "error"
@@ -318,7 +340,7 @@ async def health_check():
             cpu_usage = hardware_metrics.get("cpu", {}).get("usage_percent", 0)
             memory_usage = hardware_metrics.get("memory", {}).get("percent", 0)
             disk_usage = hardware_metrics.get("disk", {}).get("percent", 0)
-            
+
             if cpu_usage > 80:
                 health_status = "warning"
                 issues.append(f"High CPU usage: {cpu_usage}%")
@@ -328,18 +350,24 @@ async def health_check():
             if disk_usage > 90:
                 health_status = "warning"
                 issues.append(f"High disk usage: {disk_usage}%")
-        
+
         # Check Redis connection
         if redis_metrics.get("status") != "connected":
             health_status = "error"
             issues.append("Redis connection failed")
-        
+
+        # Check Postgres connection
+        if pg_metrics.get("status") != "connected":
+            health_status = "error"
+            issues.append("Postgres connection failed")
+
         return {
             "health": health_status,
             "message": "System operational" if not issues else "; ".join(issues),
             "extra_info": {
                 "hardware": hardware_metrics,
                 "redis": redis_metrics,
+                "postgres": pg_metrics,
                 "config_loaded": config is not None,
                 "data_dir_exists": config_manager.get_data_dir().exists(),
                 "logs_dir_exists": config_manager.get_logs_dir().exists()
@@ -371,6 +399,15 @@ async def get_redis_metrics():
     """Get Redis metrics and status"""
     try:
         return redis_monitor.get_redis_metrics()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/system/postgres")
+async def get_postgres_metrics():
+    """Get Postgres connectivity status"""
+    try:
+        return pg_client.get_postgres_metrics()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
