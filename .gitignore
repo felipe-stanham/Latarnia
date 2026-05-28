@@ -220,6 +220,9 @@ Thumbs.db
 # Per-environment secrets file (operator-managed, never committed)
 secrets.env
 
+# Config (host-specific — committed as config.example.json, actual config is gitignored)
+config/config.json
+
 # Latarnia specific
 # Ignore apps directory to allow user-provided sample applications
 apps/

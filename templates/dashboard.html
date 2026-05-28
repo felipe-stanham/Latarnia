@@ -17,19 +17,23 @@
       <div class="card-header fw-semibold">System Status</div>
       <div class="card-body" id="hh-system-status">
         <div class="row g-3">
-          <div class="col-md-3 col-6">
-            <div class="fw-semibold">Redis Message Bus</div>
+          <div class="col-md col-6">
+            <div class="fw-semibold">Redis</div>
             <div id="hh-redis-status" class="hh-status-badge text-muted">Loading...</div>
           </div>
-          <div class="col-md-3 col-6">
+          <div class="col-md col-6">
+            <div class="fw-semibold">Postgres</div>
+            <div id="hh-postgres-status" class="hh-status-badge text-muted">Loading...</div>
+          </div>
+          <div class="col-md col-6">
             <div class="fw-semibold">Memory</div>
             <div id="hh-memory-status" class="text-muted">--</div>
           </div>
-          <div class="col-md-3 col-6">
+          <div class="col-md col-6">
             <div class="fw-semibold">Disk</div>
             <div id="hh-disk-status" class="text-muted">--</div>
           </div>
-          <div class="col-md-3 col-6">
+          <div class="col-md col-6">
             <div class="fw-semibold">CPU / Temp</div>
             <div id="hh-cpu-temp-status" class="text-muted">--</div>
           </div>
@@ -37,6 +41,9 @@
       </div>
     </div>
   </section>
+
+  <!-- Infrastructure warning banner (shown when Redis or Postgres is down) -->
+  <div id="hh-infra-warning" class="alert alert-danger" role="alert" style="display:none;"></div>
 
   <!-- Streamlit Apps Section -->
   <section class="mb-3">
@@ -175,6 +182,7 @@
     const extra = health.extra_info || {};
     const hardware = extra.hardware || {};
     const redis = extra.redis || {};
+    const pg = extra.postgres || {};
 
     const cpuUsage = hardware.cpu?.usage_percent ?? "--";
     const temp = hardware.cpu?.temperature_c ?? "--";
@@ -188,12 +196,22 @@
     const redisStatusEl = document.getElementById("hh-redis-status");
     if (redis.status === "connected") {
       redisStatusEl.textContent = "✅ Connected";
-      redisStatusEl.classList.remove("text-muted");
-      redisStatusEl.classList.add("text-success");
+      redisStatusEl.className = "hh-status-badge text-success";
     } else {
       redisStatusEl.textContent = "❌ Disconnected";
-      redisStatusEl.classList.remove("text-muted");
-      redisStatusEl.classList.add("text-danger");
+      redisStatusEl.className = "hh-status-badge text-danger";
+    }
+
+    const pgStatusEl = document.getElementById("hh-postgres-status");
+    if (pg.status === "connected") {
+      pgStatusEl.textContent = "✅ Connected";
+      pgStatusEl.className = "hh-status-badge text-success";
+    } else if (pg.status === "error") {
+      pgStatusEl.textContent = "❌ Disconnected";
+      pgStatusEl.className = "hh-status-badge text-danger";
+    } else {
+      pgStatusEl.textContent = "-- Unknown";
+      pgStatusEl.className = "hh-status-badge text-muted";
     }
 
     document.getElementById("hh-memory-status").textContent =
@@ -208,6 +226,22 @@
 
     document.getElementById("hh-cpu-temp-status").textContent =
       `CPU: ${cpuUsage}%  |  Temp: ${temp}°C`;
+  }
+
+  function renderInfraWarning(health) {
+    const extra = health.extra_info || {};
+    const redisOk = (extra.redis || {}).status === "connected";
+    const pgOk = (extra.postgres || {}).status === "connected";
+    const banner = document.getElementById("hh-infra-warning");
+    if (redisOk && pgOk) {
+      banner.style.display = "none";
+      return;
+    }
+    const down = [];
+    if (!redisOk) down.push("Redis");
+    if (!pgOk) down.push("Postgres");
+    banner.textContent = `⚠️ Infrastructure unavailable: ${down.join(", ")} not connected — apps cannot be started.`;
+    banner.style.display = "block";
   }
 
   function statusBadge(status) {
@@ -393,6 +427,7 @@
         fetchJson("/api/activity/recent?limit=10"),
       ]);
       renderSystemStatus(health);
+      renderInfraWarning(health);
       renderApps(appList.apps || []);
       renderRecentActivity(activity.data?.activities || []);
       setLastUpdated();

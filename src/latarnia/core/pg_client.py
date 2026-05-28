@@ -36,6 +36,16 @@ class PgClient:
             self.logger.warning(f"Postgres connectivity check failed: {e}")
             return False
 
+    def get_postgres_metrics(self) -> dict:
+        """Get Postgres connectivity and version info."""
+        try:
+            with self._connect() as conn:
+                row = conn.execute("SELECT version()").fetchone()
+            version = row["version"] if row else "unknown"
+            return {"status": "connected", "version": version}
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+
     def role_exists(self, role_name: str) -> bool:
         """Check if a Postgres role exists."""
         with self._connect() as conn:

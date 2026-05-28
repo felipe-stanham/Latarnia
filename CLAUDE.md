@@ -1,4 +1,4 @@
-<!-- TEMPLATE VERSION: 0.2.0 -->
+<!-- TEMPLATE VERSION: 0.2.1 -->
 <!-- DO NOT EDIT — managed by ClaudeCodeTemplate -->
 <!-- Project-specific instructions go in docs/SYSTEM.md -->
 
@@ -53,6 +53,7 @@ Every project must have a `.gitignore` that excludes at minimum:
 ## General
 
 - Work artifacts follow a maturity ladder: **Pitch (`I-xxxx.md`) → Task (`T-xxxx.md`) → Project (`P-xxxx.md`)**. See the "Work Artifacts" section below for details.
+- Before writing any code, create a docs/Tasks/T-xxxx.md for the work (or confirm the existing task/project file you are working under). Do not start implementation without an active task or scope on record. This applies even in Auto Mode.
 - When coding, do not modify the spec — if something in it is wrong or unclear, stop and ask.
 - Do NOT work on a project, task, or pitch you have not been instructed to implement. I will name the specific file.
 - Do NOT read all the files in `docs/Projects/`, `docs/Tasks/`, or `docs/Pitches/` unless instructed to. Use the corresponding `INDEX.md` if you need to scan what's open.
@@ -243,45 +244,14 @@ Do not commit until the review passes. If the reviewer flags issues, fix them an
 
 ## Testing
 
-### Rules
-
-- **Tests must be executed, not reviewed.** Reading code and confirming it "looks correct" is not testing. No scope or task can be marked `[DONE]` based on code review alone.
+- **Tests must be executed, not reviewed.** No scope or task can be marked `[DONE]` based on code review alone.
 - **Always test against `dev` environment.** Before running any test, verify `ENV != prod`. If it is, stop and warn the user.
 - Tests that create, modify, or delete external resources must use dev/sandbox credentials only.
-
-### Declarative Tests
-
-Tests are defined declaratively — the human-maintained source of truth is the natural-language description, not the generated script. Each entry describes **what to verify**, the **concrete input(s)**, and the **expected output**. The `tester` agent generates a verification script from this spec, runs it, and reports pass/fail.
-
-- **Scope acceptance criteria** live in the `P-xxxx.md` / `T-xxxx.md` file itself.
-- **Regression tests** live in `TESTS.md` at the repo root. If creating a new `TESTS.md`, use the template at `docs/templates/TESTS.template.md`.
-- Test descriptions must be specific enough for the `tester` agent to generate verification without guessing. Always include concrete sample inputs and the expected output, not just a verb.
-- Format:
-  ```
-  - **test_name:** [What to do, with concrete input] → [Expected result, with concrete output]
-  ```
-
-### Cached Scripts
-
-To stop wasting tokens regenerating identical verification scripts on every run:
-
-- The `tester` agent caches generated scripts under `tests/cache/<test_name>.<ext>` alongside a `tests/cache/<test_name>.hash` file containing the SHA-256 of the test's declarative spec line.
-- On each run, the agent recomputes the hash of the current declarative spec. If it matches the cached hash, **reuse the cached script** instead of regenerating. If it differs (the spec was edited) or no cache exists, regenerate and update the hash.
-- `tests/cache/` is committed — it is the project's accumulated test logic, not throwaway output. It is the only thing inside `tests/` that exists; there is no hand-written test code.
-- If a cached script fails and the spec is unchanged, treat it as a real regression first. Only regenerate the script if you can demonstrate the script itself is broken (e.g., the API it calls was renamed), and note this in the commit message.
-
-### Scope Testing
-
-After completing a scope and passing code review, delegate to the `tester` agent. It runs the scope's acceptance criteria (using the cache rules above). All must pass before marking the scope `[DONE]`.
-
-### Regression Tests
-
-`TESTS.md` is the curated regression test registry — critical-path tests only. When a scope is marked `[DONE]`, promote any of its acceptance criteria that protect critical paths into `TESTS.md`. Keep the registry small and meaningful; do not dump every scope test in.
-
-**When to run regression tests:**
-- Before merging `dev` into `tst` (i.e., after all scopes are complete).
-- Before deploying to any target.
-- Delegate to the `tester` agent. If any fail, do not merge or deploy.
+- Test entries use the declarative format: `- **test_name:** [concrete input] → [expected output]`
+- **Scope acceptance criteria** live in the `P-xxxx.md` / `T-xxxx.md` file itself. **Regression tests** live in `TESTS.md` at the repo root.
+- After completing a scope, delegate to the `tester` agent to run acceptance criteria. All must pass before marking `[DONE]`.
+- Before merging `dev → tst`, delegate to the `tester` agent for regression tests. If any fail, do not merge.
+- When a scope is marked `[DONE]`, promote critical-path acceptance criteria into `TESTS.md`. Keep it small — do not dump every scope test in.
 
 ---
 
@@ -298,21 +268,8 @@ After completing a scope and passing code review, delegate to the `tester` agent
 ## Documentation
 
 - Document all APIs as part of the task that implements them. REST APIs must use OpenAPI.
-- At the end of each scope, delegate documentation updates to the `doc-updater` agent. The following files must be kept up to date:
-  - `workflows.md`
-    - A set of Mermaid diagrams covering the main workflows and interactions:
-    - `flowchart` for process flows and decision logic
-    - `sequenceDiagram` for system/component interactions and API calls
-  - `architecture.md` Mermaid diagrams covering:
-    - High-level component architecture
-    - Deployment topology
-    - External system interactions
-    - Data flow between components
-  - `dataModel.md`: Mermaid `erDiagram` and/or `classDiagram` representing the data model.
-    - Use `classDiagram` for objects/classes model.
-    - Use `erDiagram` for databases.
-    - Include field types and key relationships
-- `dataModel.md` always reflects the **current** schema. Migrations are project-level implementation artifacts — if a project requires them, manage them within the project's own directory structure, not in `docs/System/`.
+- After completing a scope, delegate documentation updates to the `doc-updater` agent. It updates `docs/System/workflows.md`, `architecture.md`, and `dataModel.md` based on what actually changed.
+- `docs/System/dataModel.md` always reflects the **current** schema. Migrations are project-level artifacts — manage them within the project's own directory, not in `docs/System/`.
 
 ---
 
