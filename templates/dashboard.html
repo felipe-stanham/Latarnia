@@ -185,7 +185,7 @@
     const pg = extra.postgres || {};
 
     const cpuUsage = hardware.cpu?.usage_percent ?? "--";
-    const temp = hardware.cpu?.temperature_c ?? "--";
+    const temp = hardware.temperature?.cpu_celsius ?? "--";
     const memUsed = hardware.memory?.used_mb ?? "--";
     const memTotal = hardware.memory?.total_mb ?? "--";
     const memPercent = hardware.memory?.percent ?? "--";
