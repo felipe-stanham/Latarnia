@@ -6,8 +6,19 @@ This document describes the overall architecture of the Latarnia unified home au
 
 ```mermaid
 graph TB
+    subgraph "External"
+        Browser[Web Browser]
+        MCPClient[MCP Client<br/>Claude Desktop etc.]
+        User[User]
+    end
+
+    subgraph "Caddy (systemd system)"
+        CaddyHTTPS[Caddy HTTPS<br/>:443 PRD / :8443 TST]
+        CaddyTLS[TLS — Let's Encrypt<br/>self-signed for localhost]
+    end
+
     subgraph "Raspberry Pi 5"
-        subgraph "Latarnia Main Application"
+        subgraph "Latarnia Main Application (localhost:8000)"
             FastAPI[FastAPI Web Server<br/>Port 8000]
             AppMgr[App Manager<br/>Discovery & Registry]
             Router[LaunchRouter<br/>os + type → launcher]
@@ -16,13 +27,14 @@ graph TB
             UIMgr[UI Manager<br/>Streamlit TTL]
             SysMon[System Monitor<br/>Hardware Metrics]
             MCPGateway[MCP Gateway<br/>/mcp SSE endpoint]
-            WebProxy[Web Proxy<br/>/apps/{name}/{path}]
+            CaddyMgr[CaddyConfigManager<br/>generates Caddyfile + reload]
+            AuthVerify[/auth/verify<br/>session validation]
         end
-        
+
         subgraph "Message Bus"
             Redis[(Redis<br/>Port 6379)]
         end
-        
+
         subgraph "systemd --user (Linux, linger on)"
             UA[latarnia-{env}-app_a.service]
             UB[latarnia-{env}-app_b.service]
@@ -34,31 +46,36 @@ graph TB
             StreamlitApp1[Streamlit App 1<br/>Port 8501+]
             StreamlitApp2[Streamlit App 2<br/>Port 8501+]
         end
-        
+
         subgraph "System Services"
             FileSystem[Shared Storage<br/>/opt/latarnia/]
+            CaddyFile[Caddyfile include<br/>/opt/latarnia/{env}/caddy/]
         end
     end
-    
-    subgraph "External"
-        Browser[Web Browser]
-        MCPClient[MCP Client<br/>Claude Desktop etc.]
-        User[User]
-    end
-    
+
     User --> Browser
-    Browser --> FastAPI
-    Browser -->|/apps/...| WebProxy
-    MCPClient -->|MCP SSE| MCPGateway
+    Browser -->|HTTPS| CaddyHTTPS
+    MCPClient -->|HTTPS + Bearer JWT| CaddyHTTPS
+
+    CaddyHTTPS -->|forward_auth| AuthVerify
+    CaddyHTTPS -->|/auth/* no auth| FastAPI
+    CaddyHTTPS -->|after auth| FastAPI
+    CaddyHTTPS -->|after auth, handle_path strips prefix| SvcApp1
+    CaddyHTTPS -->|after auth, handle_path strips prefix| SvcApp2
+    CaddyHTTPS -->|/apps/{name}/docs no auth| SvcApp1
+
     FastAPI --> AppMgr
     FastAPI --> Router
     FastAPI --> UIMgr
     FastAPI --> SysMon
-    WebProxy --> AppMgr
-    
+    AuthVerify --> AppMgr
+
     Router -->|Linux + service| SvcMgr
     Router -->|Darwin + service| SubLaunch
     Router -->|any + streamlit| UIMgr
+
+    CaddyMgr --> CaddyFile
+    CaddyMgr -->|POST /load Caddy admin API| CaddyHTTPS
 
     AppMgr --> Redis
     SvcMgr -.systemctl --user.-> UA
@@ -71,14 +88,12 @@ graph TB
 
     MCPGateway -->|MCP SSE| SvcApp1
     MCPGateway -->|MCP SSE| SvcApp2
-    WebProxy -->|HTTP + WebSocket| SvcApp1
-    WebProxy -->|HTTP + WebSocket| SvcApp2
-    
+
     SvcApp1 --> Redis
     SvcApp2 --> Redis
     StreamlitApp1 --> Redis
     StreamlitApp2 --> Redis
-    
+
     SvcApp1 --> FileSystem
     SvcApp2 --> FileSystem
     StreamlitApp1 --> FileSystem
@@ -203,16 +218,18 @@ graph TB
   - Configuration change notifications
   - App status updates
 
-### 12. Web Proxy
-- **Purpose**: Reverse proxy that exposes app-owned web UIs through the platform
-- **Routes**: `GET|POST|... /apps/{app_name}/{path}` (HTTP), `WS /apps/{app_name}/{path}` (WebSocket)
-- **Redirect**: Bare `/apps/{app_name}` issues a 307 to `/apps/{app_name}/`
-- **Path stripping**: `/apps/crm/dashboard` → `/dashboard` forwarded to the app
-- **HTTP client**: Shared `httpx.AsyncClient` (30 s timeout, no redirect following); closed during lifespan shutdown
-- **WebSocket client**: Per-connection `aiohttp.ClientSession` with bidirectional frame relay
-- **Header forwarding**: `X-Forwarded-For`, `X-Forwarded-Proto`, `X-Forwarded-Host`; hop-by-hop headers stripped
-- **Error pages**: HTML-escaped pages for 404 (not found / no web UI), 503 (not running / connect error), 504 (timeout), 502 (unexpected error)
-- **Guard conditions**: App must exist in registry, have `has_web_ui: true`, and status `running`
+### 12. Caddy Ingress
+- **Purpose**: Caddy (systemd system service) is the single external HTTPS ingress and reverse proxy. The platform's own Python web proxy (`web_proxy.py`) was removed in P-0008.
+- **TLS**: Let's Encrypt ACME (real domains); Caddy self-signed (localhost dev). Domain read from `{ENV}_DOMAIN` config.
+- **Ports**: `:443` PRD, `:8443` TST, `:80` ACME HTTP-01 challenge.
+- **Route structure** (generated per environment by `CaddyConfigManager`):
+  - `/auth/*`, `/docs*`, `/openapi.json` — public, proxied to Latarnia `:8000`
+  - `/apps/{name}/docs*`, `/apps/{name}/openapi.json` — public, proxied directly to app port (Service Apps only)
+  - `/apps/{name}/*` — protected via `forward_auth` to `/auth/verify`; Caddy strips the `/apps/{name}` prefix with `handle_path` before proxying to app port (Service Apps only; Streamlit Apps have no Caddy route block)
+  - `/*` catch-all — protected via `forward_auth`; proxied to Latarnia `:8000` (covers dashboard, `/api/*`, `/mcp/*`)
+- **Auth headers copied**: `X-Latarnia-User`, `X-Latarnia-App-Role`, `X-Latarnia-Is-Super`
+- **CaddyConfigManager** (`src/latarnia/caddy/manager.py`): reads the App Registry, generates the per-environment Caddyfile include at `/opt/latarnia/{env}/caddy/latarnia.caddyfile`, then reloads Caddy via `POST /load` on the Caddy admin API (`:2019`). Called on every App registration change.
+- **Firewall**: `ufw` blocks Latarnia `:8000` and app ports `:81xx` / `:90xx` from external access — all external traffic enters through Caddy only.
 
 ## Application Types
 
@@ -401,36 +418,32 @@ sequenceDiagram
     TTL->>UM: Cleanup resources
 ```
 
-### Web Proxy Request Flow
+### Caddy Authenticated App Request Flow
 ```mermaid
 sequenceDiagram
     participant Browser as User Browser
-    participant WP as Web Proxy<br/>(FastAPI router)
-    participant Reg as App Registry
+    participant C as Caddy
+    participant AV as /auth/verify<br/>(Latarnia :8000)
     participant App as Service App<br/>:810x
 
-    Browser->>WP: GET /apps/crm/dashboard
-    WP->>Reg: get_app_by_name("crm")
-    Reg-->>WP: port=8101, has_web_ui=true, status=running
+    Browser->>C: GET /apps/crm/dashboard [Cookie: latarnia_session=abc]
+    C->>AV: GET /auth/verify [X-Forwarded-Uri: /apps/crm/dashboard, Cookie: ...]
+    AV-->>C: 200 [X-Latarnia-User: uid, X-Latarnia-App-Role: webUI-med, X-Latarnia-Is-Super: false]
+    C->>App: GET /dashboard [X-Latarnia-User: uid, X-Latarnia-App-Role: webUI-med]
+    App-->>Browser: 200 OK HTML
 
-    WP->>App: GET /dashboard<br/>X-Forwarded-For/Proto/Host
-    App-->>WP: 200 OK + headers + body
-    WP-->>Browser: 200 OK (hop-by-hop headers stripped)
+    Note over Browser,App: Public swagger (no forward_auth)
 
-    Note over Browser,App: WebSocket upgrade
+    Browser->>C: GET /apps/crm/docs
+    C->>App: GET /docs (no auth check)
+    App-->>Browser: 200 OK Swagger UI
 
-    Browser->>WP: GET /apps/crm/ws (Upgrade: websocket)
-    WP->>Reg: get_app_by_name("crm")
-    Reg-->>WP: port=8101, running
-    WP->>App: aiohttp ws_connect ws://localhost:8101/ws
-    App-->>WP: 101 Switching Protocols
-    WP-->>Browser: 101 Switching Protocols
-    loop Bidirectional relay
-        Browser->>WP: WS frame
-        WP->>App: WS frame
-        App->>WP: WS frame
-        WP->>Browser: WS frame
-    end
+    Note over Browser,App: Auth failure
+
+    Browser->>C: GET /apps/crm/dashboard [no valid session]
+    C->>AV: GET /auth/verify [X-Forwarded-Uri: /apps/crm/dashboard]
+    AV-->>C: 401 Unauthorized
+    C-->>Browser: 401 (redirects to /auth/login)
 ```
 
 ## Security Model
@@ -450,7 +463,8 @@ sequenceDiagram
 - Port allocation managed centrally
 - Apps communicate via Redis message bus
 - No direct inter-app network connections
-- Web dashboard proxies app UIs
+- Caddy is the sole external ingress; app ports and Latarnia :8000 are blocked from external access by ufw
+- All external traffic to app web UIs passes through Caddy's `forward_auth` gate
 
 ### Resource Management
 - Memory and CPU limits via systemd
@@ -462,8 +476,10 @@ sequenceDiagram
 
 ### Development Environment
 ```
+localhost (Caddy self-signed TLS, port from {ENV}_DOMAIN config)
+└── forward_auth → localhost:8000 (/auth/verify — added Scope 2)
 localhost:8000 (Main Dashboard + API + MCP Gateway at /mcp)
-├── localhost:8100-8199 (Service App REST servers)
+├── localhost:8100-8199 (Service App REST servers — internal only)
 ├── localhost:9001-9099 (Service App MCP servers, declared in manifest)
 ├── localhost:8501+     (Streamlit Apps)
 └── localhost:6379      (Redis)
@@ -471,11 +487,17 @@ localhost:8000 (Main Dashboard + API + MCP Gateway at /mcp)
 
 ### Production Environment (Raspberry Pi)
 ```
-raspberrypi.local:8000 (Main Dashboard + API + MCP Gateway at /mcp)
-├── Internal:8100-8199 (Service App REST servers)
+Caddy :443 PRD / :8443 TST (Let's Encrypt TLS, ufw allows 80/443/8443/22)
+└── forward_auth → localhost:8000 (/auth/verify — added Scope 2)
+localhost:8000 (Main Dashboard + API + MCP Gateway at /mcp — internal only)
+├── Internal:8100-8199 (Service App REST servers — internal only)
 ├── Internal:9001-9099 (Service App MCP servers, declared in manifest)
 ├── Internal:8501+     (Streamlit Apps)
 └── Internal:6379      (Redis)
+
+systemd system unit:
+/etc/systemd/system/
+└── caddy.service  (ports 80 ACME, 443 PRD, 8443 TST, 2019 admin)
 
 systemd --user units (per-app, generated at runtime):
 ~/.config/systemd/user/
@@ -496,7 +518,11 @@ Prerequisite: sudo loginctl enable-linger {user}
 ├── apps/ (Discovered applications)
 ├── data/ (Per-app data directories)
 ├── logs/ (Per-app log directories)
-└── registry/ (App registry persistence)
+├── registry/ (App registry persistence)
+├── prd/caddy/latarnia.caddyfile  (generated by CaddyConfigManager — PRD)
+└── tst/caddy/latarnia.caddyfile  (generated by CaddyConfigManager — TST)
+
+/etc/caddy/Caddyfile  (manually configured; imports the per-env includes above)
 ```
 
 ## Performance Considerations
