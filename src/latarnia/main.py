@@ -1,6 +1,7 @@
 """
 Main FastAPI application for Latarnia
 """
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -173,6 +174,20 @@ async def lifespan(app: FastAPI):
             ):
                 await mcp_gateway.on_app_started(app_entry.app_id)
 
+    # Generate the Caddyfile from current registry state and reload Caddy.
+    # Runs after auto-start so running apps already have assigned ports and
+    # get webUI route blocks. A reload failure (e.g. Caddy not installed in
+    # local dev) is logged but does not block platform startup.
+    logger.info("Generating Caddy configuration...")
+    try:
+        caddy_manager.generate_config()
+        if caddy_manager.reload():
+            logger.info("Caddy configuration loaded")
+        else:
+            logger.warning("Caddy reload did not succeed (see logs above)")
+    except Exception as exc:
+        logger.error("Caddy config generation failed: %s", exc)
+
     # Start Redis stream consumer
     logger.info("Starting Redis stream consumer...")
     await event_subscriber.start()
@@ -198,8 +213,6 @@ async def lifespan(app: FastAPI):
     subprocess_launcher.stop_all()
     logger.info("Stopping all Streamlit apps...")
     streamlit_manager.stop_all()
-    logger.info("Closing web proxy HTTP client...")
-    await web_proxy_module.shutdown()
     logger.info("Shutdown complete")
 
 
@@ -263,10 +276,14 @@ if config_manager.config.mcp.enabled:
     mcp_gateway = MCPGateway(config_manager, app_manager)
     app_manager.mcp_gateway = mcp_gateway
 
-# Initialize web UI proxy
-from .web.web_proxy import router as web_proxy_router
-from .web import web_proxy as web_proxy_module
-web_proxy_module.app_manager = app_manager
+# Initialize Caddy config manager (P-0008). Caddy is now the single ingress
+# and reverse proxy; the old Python web_proxy has been removed. The manager
+# regenerates the per-env Caddyfile from registry state on app lifecycle
+# events and asks Caddy to reload.
+from .caddy import CaddyConfigManager
+
+caddy_manager = CaddyConfigManager(config_manager, app_manager)
+app_manager.caddy_manager = caddy_manager
 
 
 # Create FastAPI app
@@ -279,9 +296,6 @@ app = FastAPI(
 
 # Include web dashboard routes
 app.include_router(dashboard_router)
-
-# Include web UI proxy routes (catch-all, must be after specific routes)
-app.include_router(web_proxy_router)
 
 
 async def _cleanup_orphaned_apps() -> int:
@@ -457,6 +471,9 @@ async def discover_apps():
     try:
         count = app_manager.discover_apps()
         orphan_count = await _cleanup_orphaned_apps()
+        # Regenerate unconditionally: a manual discovery may have picked up an
+        # externally-started app whose port wasn't reflected in the Caddyfile.
+        await asyncio.to_thread(caddy_manager.on_app_registered)
         return {
             "discovered_count": count,
             "orphans_cleaned": orphan_count,
@@ -622,6 +639,10 @@ async def delete_app(app_id: str, delete_folder: bool = False):
             except OSError as exc:
                 logger.warning("Could not delete app folder %s: %s", app_path, exc)
 
+        # App is gone from the registry — regenerate Caddy routes (drops its
+        # webUI/swagger blocks so they 404).
+        await asyncio.to_thread(caddy_manager.on_app_deregistered, app_id)
+
         return {
             "success": True,
             "message": f"App {app_id} deleted successfully",
@@ -714,6 +735,7 @@ async def start_service(app_id: str):
                     detail=f"MCP backward compatibility violation for app {app_id}. "
                     "Previously registered tools were removed. App stopped.",
                 )
+            await asyncio.to_thread(caddy_manager.on_app_registered, app_id)
             return {"success": True, "message": f"Service started for app {app_id}"}
         else:
             raise HTTPException(status_code=400, detail=f"Failed to start service for app {app_id}")
@@ -732,6 +754,7 @@ async def stop_service(app_id: str):
         if success:
             if mcp_gateway:
                 await mcp_gateway.on_app_stopped(app_id)
+            await asyncio.to_thread(caddy_manager.on_app_deregistered, app_id)
             return {"success": True, "message": f"Service stopped for app {app_id}"}
         else:
             raise HTTPException(status_code=400, detail=f"Failed to stop service for app {app_id}")
@@ -756,6 +779,7 @@ async def restart_service(app_id: str):
                     detail=f"MCP backward compatibility violation for app {app_id}. "
                     "Previously registered tools were removed. App stopped.",
                 )
+            await asyncio.to_thread(caddy_manager.on_app_registered, app_id)
             return {"success": True, "message": f"Service restarted for app {app_id}"}
         else:
             raise HTTPException(status_code=400, detail=f"Failed to restart service for app {app_id}")
@@ -1273,6 +1297,7 @@ async def start_app_process(app_id: str):
                 "Previously registered tools were removed. App stopped.",
             )
 
+        await asyncio.to_thread(caddy_manager.on_app_registered, app_id)
         return {"success": True, "message": f"App {app_id} started successfully"}
 
     except HTTPException:
@@ -1302,6 +1327,7 @@ async def stop_app_process(app_id: str):
         if mcp_gateway:
             await mcp_gateway.on_app_stopped(app_id)
 
+        await asyncio.to_thread(caddy_manager.on_app_deregistered, app_id)
         return {"success": True, "message": f"App {app_id} stopped successfully"}
 
     except HTTPException:
@@ -1340,6 +1366,7 @@ async def restart_app_process(app_id: str):
                 "Previously registered tools were removed. App stopped.",
             )
 
+        await asyncio.to_thread(caddy_manager.on_app_registered, app_id)
         return {"success": True, "message": f"App {app_id} restarted successfully"}
 
     except HTTPException:

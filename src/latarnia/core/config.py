@@ -3,6 +3,7 @@ Configuration management for Latarnia
 """
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Dict, Any, Optional
 from pydantic import BaseModel, Field
@@ -145,6 +146,32 @@ class ConfigManager:
             return f"postgresql://{pg.superuser}@{pg.host}:{pg.port}/{dbname}"
         else:
             return f"postgresql://@{pg.host}:{pg.port}/{dbname}"
+
+    def get_env(self) -> str:
+        """Resolve the active environment (dev | tst | prd).
+
+        Read from the `ENV` environment variable; anything outside the
+        known set falls back to `dev`. Matches ServiceManager/SecretManager
+        env resolution so all platform components agree on the environment.
+        """
+        env = os.environ.get("ENV", "dev").lower()
+        return env if env in ("dev", "tst", "prd") else "dev"
+
+    def get_domain(self) -> str:
+        """Resolve the public domain for the active environment.
+
+        Reads `{ENV}_DOMAIN` (e.g. `PRD_DOMAIN`, `TST_DOMAIN`) from the
+        environment. When unset, `dev` defaults to `localhost`; other envs
+        also fall back to `localhost` so a misconfigured host stays on a
+        self-signed cert rather than attempting ACME against an empty name.
+        """
+        env = self.get_env()
+        domain = os.environ.get(f"{env.upper()}_DOMAIN", "").strip()
+        return domain or "localhost"
+
+    def get_platform_db_name(self) -> str:
+        """Name of the platform auth DB for the active environment."""
+        return f"latarnia_platform_{self.get_env()}"
 
     def get_data_dir(self, app_name: Optional[str] = None) -> Path:
         """Get data directory path, optionally for specific app"""

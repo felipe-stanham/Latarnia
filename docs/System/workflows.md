@@ -383,76 +383,54 @@ sequenceDiagram
     Dash->>Dash: Format timestamps,<br/>extract messages
 ```
 
-## 10. Web UI Reverse Proxy Request Flow
+## 10. Caddy Ingress — App Request Flow
 
-How the platform proxies HTTP and WebSocket requests to app-owned web UIs. References cap-008 in P-0002.
+How external browser requests reach Service App web UIs via Caddy (P-0008 Scope 1). The platform's Python web proxy was removed; Caddy is now the sole reverse proxy for app traffic. References P-0008 architecture.
 
 ```mermaid
 sequenceDiagram
     participant Browser as User Browser
-    participant Proxy as Web Proxy<br/>/apps/{name}/{path}
-    participant Reg as App Registry
-    participant App as App Web Server<br/>:810x
+    participant C as Caddy
+    participant AV as /auth/verify<br/>(Latarnia :8000)
+    participant App as Service App<br/>:810x
 
-    Browser->>Proxy: GET /apps/crm/ (HTTP)
-    Proxy->>Reg: Lookup app crm
-    Reg-->>Proxy: port=8101, has_web_ui=true, running
+    Note over Browser,App: Protected app page
 
-    Proxy->>App: GET / + X-Forwarded-For/Proto/Host headers
-    App-->>Proxy: 200 OK (HTML)
-    Proxy-->>Browser: 200 OK (HTML, stripped response headers)
+    Browser->>C: GET /apps/crm/dashboard [Cookie: latarnia_session=abc]
+    C->>AV: GET /auth/verify [X-Forwarded-Uri: /apps/crm/dashboard, Cookie: ...]
+    AV-->>C: 200 [X-Latarnia-User: uid, X-Latarnia-App-Role: webUI-med, X-Latarnia-Is-Super: false]
+    C->>App: GET /dashboard [X-Latarnia-User, X-Latarnia-App-Role headers]
+    App-->>Browser: 200 OK HTML
 
-    Note over Browser,App: Static assets
+    Note over Browser,App: Public Swagger (no auth check)
 
-    Browser->>Proxy: GET /apps/crm/static/style.css
-    Proxy->>App: GET /static/style.css
-    App-->>Proxy: 200 OK (CSS)
-    Proxy-->>Browser: 200 OK (CSS)
+    Browser->>C: GET /apps/crm/docs
+    C->>App: GET /docs
+    App-->>Browser: 200 OK Swagger UI
 
-    Note over Browser,App: WebSocket upgrade (via aiohttp)
+    Note over Browser,App: Unauthenticated request
 
-    Browser->>Proxy: GET /apps/crm/ws (Upgrade: websocket)
-    Proxy->>App: WS connect ws://localhost:8101/ws
-    App-->>Proxy: 101 Switching Protocols
-    Proxy-->>Browser: 101 Switching Protocols
-    Browser->>Proxy: WS frames (bidirectional relay)
-    Proxy->>App: WS frames (bidirectional relay)
-
-    Note over Browser,App: Error scenarios
-
-    Browser->>Proxy: GET /apps/offline_app/
-    Proxy->>Reg: Lookup offline_app
-    Reg-->>Proxy: status=stopped
-    Proxy-->>Browser: 503 App Unavailable (HTML error page)
-
-    Browser->>Proxy: GET /apps/unknown/
-    Proxy->>Reg: Lookup unknown
-    Reg-->>Proxy: not found
-    Proxy-->>Browser: 404 App Not Found (HTML error page)
+    Browser->>C: GET /apps/crm/dashboard [no valid session]
+    C->>AV: GET /auth/verify
+    AV-->>C: 401 Unauthorized
+    C-->>Browser: 401 (redirects to /auth/login)
 ```
 
 ```mermaid
 flowchart TD
-    Request([Incoming request<br/>/apps/app_name/path]) --> Redirect{Bare /apps/app_name<br/>no trailing slash?}
-    Redirect -- Yes --> HTTP307[307 Redirect to /apps/app_name/]
+    Request([Incoming HTTPS request]) --> RouteMatch{Route match?}
 
-    Redirect -- No --> LookupApp[Lookup app in registry]
-    LookupApp --> Exists{App found?}
-    Exists -- No --> E404[404 Not Found page]
+    RouteMatch -- "/auth/* or /docs*" --> PublicLatarnia[Proxy to Latarnia :8000<br/>no auth check]
+    RouteMatch -- "/apps/name/docs* or /openapi.json" --> PublicSwagger[Proxy to App port<br/>no auth check]
+    RouteMatch -- "/apps/name/*" --> ForwardAuth[forward_auth to /auth/verify]
+    RouteMatch -- "/* catch-all" --> ForwardAuthCatchAll[forward_auth to /auth/verify]
 
-    Exists -- Yes --> HasWebUI{has_web_ui = true?}
-    HasWebUI -- No --> E404NoUI[404 No Web UI page]
+    ForwardAuth --> AuthOk{/auth/verify response?}
+    AuthOk -- 401 --> Deny[Return 401 to browser]
+    AuthOk -- 200 + headers --> StripPrefix[handle_path strips /apps/name prefix]
+    StripPrefix --> ProxyApp[Proxy to App port with<br/>X-Latarnia-* headers]
 
-    HasWebUI -- Yes --> IsRunning{status = running?}
-    IsRunning -- No --> E503[503 App Unavailable page]
-
-    IsRunning -- Yes --> IsWS{WebSocket upgrade?}
-    IsWS -- Yes --> WSProxy[aiohttp bidirectional relay<br/>to ws://localhost:PORT/path]
-    IsWS -- No --> HTTPProxy[httpx.AsyncClient request<br/>to http://localhost:PORT/path]
-
-    HTTPProxy --> ConnectOk{Connect OK?}
-    ConnectOk -- ConnectError --> E503Connect[503 Cannot connect page]
-    ConnectOk -- Timeout --> E504[504 Gateway Timeout page]
-    ConnectOk -- Other error --> E502[502 Bad Gateway page]
-    ConnectOk -- Success --> ForwardResp[Forward status + headers + body]
+    ForwardAuthCatchAll --> AuthOkCatchAll{/auth/verify response?}
+    AuthOkCatchAll -- 401 --> DenyCatchAll[Return 401 to browser]
+    AuthOkCatchAll -- 200 + headers --> ProxyLatarnia[Proxy to Latarnia :8000 with<br/>X-Latarnia-* headers]
 ```
