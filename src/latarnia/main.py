@@ -11,7 +11,7 @@ from typing import Optional
 
 import shutil
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
 from latarnia.core.config import config_manager
@@ -312,8 +312,9 @@ app_manager.caddy_manager = caddy_manager
 from .auth import AuthDB
 from .auth.users import UserStore
 from .auth.sessions import SessionStore
+from .auth.roles import RoleStore
 from .auth.providers import TOTPAuthProvider
-from .auth.routes import build_auth_router
+from .auth.routes import build_auth_router, resolve_session_user
 
 
 def _load_platform_secret(name: str) -> Optional[str]:
@@ -341,12 +342,26 @@ def _totp_key_loader() -> bytes:
 auth_db = AuthDB(config_manager, pg_client)
 user_store = UserStore(auth_db)
 session_store = SessionStore(auth_db, config_manager)
+role_store = RoleStore(auth_db, user_store)
 totp_provider = TOTPAuthProvider(
     auth_db, _totp_key_loader, issuer=config_manager.config.auth.totp_issuer
 )
 auth_router = build_auth_router(
     auth_db, user_store, session_store, totp_provider, config_manager,
+    role_store=role_store, app_manager=app_manager,
 )
+
+
+def _session_user(request):
+    """Resolve the browser session's user (cookie-only), or None.
+
+    Delegates to the auth module's single resolver so dashboard data scoping
+    (e.g. /api/apps) and the auth router never diverge. Behind Caddy the
+    session cookie is forwarded, so this works there too.
+    """
+    return resolve_session_user(
+        request, session_store, user_store, config_manager.config.auth.cookie_name
+    )
 
 
 # Create FastAPI app
@@ -551,12 +566,27 @@ async def discover_apps():
 
 
 @app.get("/api/apps")
-async def get_all_apps():
-    """Get all registered applications with combined systemd+/health status."""
+async def get_all_apps(request: Request):
+    """Get registered apps with combined systemd+/health status.
+
+    Role-scoped (P-0008 cap-015): when a browser session is present, a
+    non-superuser only sees apps where their role for that app is not `none`,
+    so dashboard tiles are filtered server-side before the client renders them.
+    Superusers (and, in dev, unauthenticated direct access) see all apps.
+    Machine-token (JWT) scoping is layered on in Scope 4.
+
+    Security invariant: the `user=None` (unauthenticated) branch returns all
+    apps. This is safe only because in prod ufw blocks port 8000 and Caddy's
+    forward_auth guarantees an authenticated session reaches this endpoint;
+    direct unauthenticated access is a dev-only convenience.
+    """
     try:
+        user = _session_user(request)
         apps = app_manager.registry.get_all_apps()
         payload = []
         for app_entry in apps:
+            if not role_store.is_visible(user, app_entry.name):
+                continue
             entry = app_entry.to_dict()
             combined = health_monitor.get_overall_status(app_entry.app_id)
             entry["overall_status"] = combined["overall_status"]
