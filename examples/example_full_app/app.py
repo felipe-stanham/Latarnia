@@ -32,13 +32,31 @@ try:
 except ImportError:
     redis = None
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from contextvars import ContextVar
+from html import escape as html_escape
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from mcp import types as mcp_types
 from mcp.server import Server
 from mcp.server.sse import SseServerTransport
 from starlette.applications import Starlette
 from starlette.routing import Route, Mount
+
+# ---------------------------------------------------------------------------
+# P-0008 role awareness
+# ---------------------------------------------------------------------------
+# Latarnia/Caddy injects X-Latarnia-App-Role on proxied webUI requests, and the
+# MCP gateway forwards it on the SSE connection to this app's MCP server. The
+# header is trusted because app ports are not externally reachable (ufw). When
+# absent (e.g. direct access in dev with no auth in front), we default to
+# "full" so the app stays fully usable — apps may ignore the header entirely.
+ROLE_HEADER = "x-latarnia-app-role"
+DEFAULT_ROLE = "full"
+WRITE_ROLES = {"webUI-med", "webUI-full", "full"}        # may create via webUI
+DESTRUCTIVE_MCP_ROLES = {"webUI-full", "full"}            # may run write MCP tools
+
+# Per-connection role for the in-flight MCP SSE session (set in handle_sse).
+_mcp_role: ContextVar[str] = ContextVar("mcp_role", default=DEFAULT_ROLE)
 
 # ---------------------------------------------------------------------------
 # Global state (set by main())
@@ -422,15 +440,9 @@ WEB_UI_HTML = """<!DOCTYPE html>
 <body>
     <h1>Example Full App <span class="badge">v1.0.0</span></h1>
     <p id="status">Loading...</p>
+    <!--ROLE_BANNER-->
 
-    <div class="section">
-        <h2>Add Item</h2>
-        <form onsubmit="addItem(event)">
-            <input type="text" id="itemName" placeholder="Item name" required>
-            <input type="text" id="itemDesc" placeholder="Description">
-            <button type="submit">Add</button>
-        </form>
-    </div>
+    <!--ADD_ITEM-->
 
     <div class="section">
         <h2>Items</h2>
@@ -459,6 +471,8 @@ WEB_UI_HTML = """<!DOCTYPE html>
             <li>Depends on <code>example_companion</code> &ge; 1.0.0</li>
         </ul>
     </div>
+
+    <!--ADMIN-->
 
     <script>
         async function loadData() {
@@ -516,14 +530,52 @@ WEB_UI_HTML = """<!DOCTYPE html>
 </html>"""
 
 
+# Role-conditioned fragments injected into the page by render_web_ui().
+ADD_ITEM_HTML = """    <div class="section">
+        <h2>Add Item</h2>
+        <form onsubmit="addItem(event)">
+            <input type="text" id="itemName" placeholder="Item name" required>
+            <input type="text" id="itemDesc" placeholder="Description">
+            <button type="submit">Add</button>
+        </form>
+    </div>"""
+
+ADMIN_HTML = """    <div class="section">
+        <h2>Admin</h2>
+        <p>Full-access controls (visible only with role <code>full</code>).</p>
+    </div>"""
+
+
+def render_web_ui(role: str) -> str:
+    """Render the page adjusted for the caller's X-Latarnia-App-Role.
+
+    - write actions (Add Item) hidden below webUI-med (cap-023)
+    - admin section shown only for `full`
+    Unknown/absent role defaults to `full` (backward compatible).
+    """
+    show_write = role in WRITE_ROLES
+    show_admin = role == "full"
+    # Escape: the header is trusted in prod, but apps copy this fixture and may
+    # run with the port exposed in dev — model the safe pattern.
+    banner = (f'<p style="color:#0b5ed7">Your access level: '
+              f'<strong>{html_escape(role)}</strong></p>')
+    html = WEB_UI_HTML
+    html = html.replace("<!--ROLE_BANNER-->", banner)
+    html = html.replace("<!--ADD_ITEM-->", ADD_ITEM_HTML if show_write else "")
+    html = html.replace("<!--ADMIN-->", ADMIN_HTML if show_admin else "")
+    return html
+
+
 @rest_app.get("/", response_class=HTMLResponse)
-async def web_ui_root():
-    return WEB_UI_HTML
+async def web_ui_root(request: Request):
+    role = request.headers.get(ROLE_HEADER, DEFAULT_ROLE)
+    return render_web_ui(role)
 
 
 @rest_app.get("/index.html", response_class=HTMLResponse)
-async def web_ui_index():
-    return WEB_UI_HTML
+async def web_ui_index(request: Request):
+    role = request.headers.get(ROLE_HEADER, DEFAULT_ROLE)
+    return render_web_ui(role)
 
 
 # ---------------------------------------------------------------------------
@@ -535,13 +587,22 @@ mcp_server = Server("example-full-app")
 
 @mcp_server.list_tools()
 async def list_tools():
-    return [
+    # Role-aware tool list (cap-023): the write tool `add_item` is only exposed
+    # to roles allowed to mutate (webUI-full / full). Read tools always show.
+    tools = [
         mcp_types.Tool(
             name="list_items",
             description="List all items in the database",
             inputSchema={"type": "object", "properties": {}, "required": []},
         ),
         mcp_types.Tool(
+            name="get_status",
+            description="Get the current status of the example app",
+            inputSchema={"type": "object", "properties": {}, "required": []},
+        ),
+    ]
+    if _mcp_role.get() in DESTRUCTIVE_MCP_ROLES:
+        tools.insert(1, mcp_types.Tool(
             name="add_item",
             description="Add a new item to the database",
             inputSchema={
@@ -552,13 +613,8 @@ async def list_tools():
                 },
                 "required": ["name"],
             },
-        ),
-        mcp_types.Tool(
-            name="get_status",
-            description="Get the current status of the example app",
-            inputSchema={"type": "object", "properties": {}, "required": []},
-        ),
-    ]
+        ))
+    return tools
 
 
 @mcp_server.call_tool()
@@ -568,6 +624,10 @@ async def call_tool(name: str, arguments: dict):
         return [{"type": "text", "text": json.dumps(items, default=str)}]
 
     if name == "add_item":
+        # Enforce role even if a client calls the tool without listing it first.
+        if _mcp_role.get() not in DESTRUCTIVE_MCP_ROLES:
+            return [{"type": "text",
+                     "text": f"Error: role '{_mcp_role.get()}' may not add items"}]
         item_name = arguments.get("name", "Unnamed")
         description = arguments.get("description", "")
         try:
@@ -599,13 +659,21 @@ def _build_mcp_app() -> Starlette:
     sse_transport = SseServerTransport("/messages/")
 
     async def handle_sse(scope, receive, send):
-        async with sse_transport.connect_sse(
-            scope, receive, send
-        ) as streams:
-            await mcp_server.run(
-                streams[0], streams[1],
-                mcp_server.create_initialization_options(),
-            )
+        # Capture the role the gateway forwarded for this connection so the
+        # tool handlers can apply role-aware behaviour (cap-016/cap-021).
+        headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
+        role = headers.get(ROLE_HEADER, DEFAULT_ROLE)
+        role_token = _mcp_role.set(role)
+        try:
+            async with sse_transport.connect_sse(
+                scope, receive, send
+            ) as streams:
+                await mcp_server.run(
+                    streams[0], streams[1],
+                    mcp_server.create_initialization_options(),
+                )
+        finally:
+            _mcp_role.reset(role_token)
 
     sse_route = Route("/sse", endpoint=lambda _: None)
     sse_route.app = handle_sse
