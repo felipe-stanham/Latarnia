@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import io
 import logging
+import re
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
@@ -37,6 +38,26 @@ H_SUPER = "X-Latarnia-Is-Super"
 
 DASHBOARD_PATH = "/dashboard"
 
+# Usernames are constrained to a safe, render-friendly character set. This is
+# the authoritative defense against HTML/JS injection via a username that is
+# later interpolated into the dashboard (the dashboard also escapes, belt-and-
+# braces). 1–64 chars of letters, digits, dot, underscore, hyphen.
+USERNAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
+
+def resolve_session_user(request, session_store, user_store, cookie_name):
+    """Single source of truth for cookie-based current-user resolution.
+
+    Returns the user row or None. Used by the auth router and by the platform's
+    own role-scoped endpoints (e.g. /api/apps) so the two never diverge — Scope
+    4's JWT support augments this one function.
+    """
+    token = request.cookies.get(cookie_name)
+    uid = session_store.validate_session(token)
+    if not uid:
+        return None
+    return user_store.get_user_by_id(uid)
+
 
 def _qr_data_uri(otpauth_uri: str) -> str:
     """Render a TOTP provisioning URI to a base64 PNG data URI (no PIL)."""
@@ -59,14 +80,16 @@ def _extract_app_name(forwarded_uri: str) -> Optional[str]:
 
 
 def build_auth_router(auth_db, user_store, session_store, totp_provider,
-                      config_manager, role_lookup=None) -> APIRouter:
+                      config_manager, role_store=None, app_manager=None) -> APIRouter:
     """Assemble the auth router.
 
-    `role_lookup(user_id, app_name) -> str` is optional (added in Scope 3).
-    Until then, app role resolves to 'full' for superusers and 'none' otherwise.
+    `role_store` (RoleStore) is optional. When absent (pre-Scope-3), app role
+    resolves to 'full' for superusers and 'none' otherwise. `app_manager`, when
+    provided, lets role assignment reject unknown app names.
     """
     router = APIRouter()
     cookie_name = config_manager.config.auth.cookie_name
+    role_lookup = role_store.get_role if role_store is not None else None
 
     def _render(request, template, ctx, status_code=200):
         # Auth pages (esp. setup, which shows the plaintext TOTP secret for
@@ -89,22 +112,20 @@ def build_auth_router(auth_db, user_store, session_store, totp_provider,
         )
 
     def _current_user(request: Request):
-        # Cookie-only, by design. The session cookie is forwarded by Caddy to
-        # the backend, so this works both directly (dev) and behind the proxy.
-        # We deliberately do NOT trust the X-Latarnia-User header here: that
-        # header is set by Caddy for downstream *apps*, and trusting it for
-        # Latarnia's own privileged endpoints would be spoofable whenever the
-        # platform port is reachable (e.g. dev, where ufw isn't in play).
-        token = request.cookies.get(cookie_name)
-        uid = session_store.validate_session(token)
-        if not uid:
-            return None
-        return user_store.get_user_by_id(uid)
+        # Cookie-only, by design (see resolve_session_user). We deliberately do
+        # NOT trust the X-Latarnia-User header for Latarnia's own privileged
+        # endpoints — it's set by Caddy for downstream apps and is spoofable
+        # whenever the platform port is reachable (e.g. dev, where ufw is off).
+        return resolve_session_user(request, session_store, user_store, cookie_name)
 
-    def _require_superuser(request: Request):
+    def _require_user(request: Request):
         user = _current_user(request)
         if not user:
             raise HTTPException(status_code=401, detail="Authentication required")
+        return user
+
+    def _require_superuser(request: Request):
+        user = _require_user(request)
         if not user["is_superuser"]:
             raise HTTPException(status_code=403, detail="Superuser required")
         return user
@@ -273,6 +294,11 @@ def build_auth_router(auth_db, user_store, session_store, totp_provider,
         username = (body or {}).get("username", "").strip()
         if not username:
             raise HTTPException(status_code=400, detail="username is required")
+        if not USERNAME_RE.match(username):
+            raise HTTPException(
+                status_code=400,
+                detail="username must be 1-64 chars of letters, digits, '.', '_', '-'",
+            )
         if user_store.get_user_by_username(username):
             raise HTTPException(status_code=409, detail="username already exists")
         is_superuser = bool((body or {}).get("is_superuser", False))
@@ -291,5 +317,53 @@ def build_auth_router(auth_db, user_store, session_store, totp_provider,
             raise HTTPException(status_code=404, detail="User not found")
         user_store.deactivate_user(user_id)
         return {"success": True, "message": f"User {target['username']} deactivated"}
+
+    # ------------------------------------------------------------------
+    # Role API
+    # ------------------------------------------------------------------
+
+    @router.get("/api/auth/roles")
+    async def my_roles(request: Request):
+        """The calling user's identity + per-app role map (for the dashboard)."""
+        user = _require_user(request)
+        roles = role_store.get_all_roles(user["id"]) if role_store else {}
+        return {
+            "username": user["username"],
+            "is_superuser": user["is_superuser"],
+            "roles": roles,
+        }
+
+    @router.get("/api/auth/roles/all")
+    async def all_user_roles(request: Request):
+        """Every user with their role map — superuser only (admin UI)."""
+        _require_superuser(request)
+        if role_store is None:
+            return {"users": []}
+        return {"users": role_store.get_users_with_roles()}
+
+    @router.post("/api/auth/roles/{app_name}")
+    async def assign_role(request: Request, app_name: str):
+        """Assign a user's role for an app. Superuser only; `full` is gated
+        again in RoleStore.set_role (defense in depth)."""
+        actor = _require_superuser(request)
+        if role_store is None:
+            raise HTTPException(status_code=503, detail="Role store unavailable")
+        body = await request.json()
+        role = (body or {}).get("role")
+        target_user_id = (body or {}).get("user_id")
+        if not role or not target_user_id:
+            raise HTTPException(status_code=400, detail="role and user_id are required")
+        if app_manager is not None and app_manager.registry.get_app_by_name(app_name) is None:
+            raise HTTPException(status_code=404, detail=f"Unknown app: {app_name}")
+        if not user_store.get_user_by_id(target_user_id):
+            raise HTTPException(status_code=404, detail="User not found")
+        try:
+            role_store.set_role(target_user_id, app_name, role, granted_by=actor["id"])
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {"success": True, "app_name": app_name, "role": role,
+                "user_id": str(target_user_id)}
 
     return router
