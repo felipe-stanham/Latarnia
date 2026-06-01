@@ -110,6 +110,13 @@ async def lifespan(app: FastAPI):
             "LATARNIA_TOTP_ENC_KEY is missing or invalid — TOTP setup/login "
             "will fail. Add a 32-byte base64 key to secrets.env (mode 600)."
         )
+    try:
+        _jwt_secret_loader()
+    except Exception:
+        logger.error(
+            "LATARNIA_JWT_SECRET is missing — machine-token issuance/validation "
+            "will fail. Add it to secrets.env (mode 600)."
+        )
 
     # Linger check: per-app user units only survive logout when linger is on.
     # Warn loudly but do not block startup — the main platform itself runs as
@@ -314,6 +321,9 @@ from .auth.users import UserStore
 from .auth.sessions import SessionStore
 from .auth.roles import RoleStore
 from .auth.providers import TOTPAuthProvider
+from .auth.jwt_auth import JWTAuth
+from .auth.tokens import MachineTokenStore
+from .auth.middleware import JWTAuthMiddleware
 from .auth.routes import build_auth_router, resolve_session_user
 
 
@@ -339,6 +349,15 @@ def _totp_key_loader() -> bytes:
     return base64.b64decode(raw)
 
 
+def _jwt_secret_loader() -> str:
+    raw = _load_platform_secret("LATARNIA_JWT_SECRET")
+    if not raw:
+        raise ValueError(
+            "LATARNIA_JWT_SECRET is not set (add it to secrets.env, mode 600)"
+        )
+    return raw
+
+
 auth_db = AuthDB(config_manager, pg_client)
 user_store = UserStore(auth_db)
 session_store = SessionStore(auth_db, config_manager)
@@ -346,9 +365,17 @@ role_store = RoleStore(auth_db, user_store)
 totp_provider = TOTPAuthProvider(
     auth_db, _totp_key_loader, issuer=config_manager.config.auth.totp_issuer
 )
+jwt_auth = JWTAuth(_jwt_secret_loader)
+token_store = MachineTokenStore(auth_db, jwt_auth)
+# Enforce JWT on the MCP gateway (cap-021): Bearer required, tool list scoped,
+# X-Latarnia-App-Role forwarded to per-app MCP servers.
+if mcp_gateway is not None:
+    mcp_gateway.jwt_auth = jwt_auth
+    mcp_gateway.token_store = token_store
 auth_router = build_auth_router(
     auth_db, user_store, session_store, totp_provider, config_manager,
     role_store=role_store, app_manager=app_manager,
+    jwt_auth=jwt_auth, token_store=token_store,
 )
 
 
@@ -372,8 +399,20 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Include auth routes (/auth/* and /api/auth/*) — must be reachable without a
-# session (Caddy routes /auth/* publicly; verify is the forward_auth target).
+# Auth gate for /api/* (P-0008 Scope 4): require a valid Bearer JWT or session
+# cookie. Pure-ASGI so /auth/*, /mcp (SSE) and websockets pass through
+# untouched. MCP auth is enforced inside the gateway.
+app.add_middleware(
+    JWTAuthMiddleware,
+    jwt_auth=jwt_auth,
+    token_store=token_store,
+    session_store=session_store,
+    cookie_name=config_manager.config.auth.cookie_name,
+)
+
+# Include auth routes (/auth/* and /api/auth/*) — /auth/* must be reachable
+# without a session (Caddy routes /auth/* publicly; verify is the forward_auth
+# target). /api/auth/* is gated by the middleware above.
 app.include_router(auth_router)
 
 # Include web dashboard routes
@@ -581,11 +620,20 @@ async def get_all_apps(request: Request):
     direct unauthenticated access is a dev-only convenience.
     """
     try:
+        claims = getattr(request.state, "jwt_claims", None)
         user = _session_user(request)
+        # The middleware already gated this route; if neither identity resolves
+        # now (e.g. session revoked in the TOCTOU window), fail closed.
+        if claims is None and user is None:
+            raise HTTPException(status_code=401, detail="Authentication required")
         apps = app_manager.registry.get_all_apps()
         payload = []
         for app_entry in apps:
-            if not role_store.is_visible(user, app_entry.name):
+            if claims is not None and not claims.get("super"):
+                # Machine token: scoped to the apps named in its JWT claim.
+                if claims.get("apps", {}).get(app_entry.name, "none") == "none":
+                    continue
+            elif not role_store.is_visible(user, app_entry.name):
                 continue
             entry = app_entry.to_dict()
             combined = health_monitor.get_overall_status(app_entry.app_id)
@@ -601,13 +649,30 @@ async def get_all_apps(request: Request):
 
 
 @app.get("/api/apps/{app_id}")
-async def get_app(app_id: str):
-    """Get a specific application by ID"""
+async def get_app(app_id: str, request: Request):
+    """Get a specific application by ID (role/scope enforced).
+
+    A machine token scoped to other apps (cap-020) gets 403; a non-superuser
+    session with role `none` for the app likewise gets 403.
+    """
     try:
         app = app_manager.registry.get_app(app_id)
         if not app:
             raise HTTPException(status_code=404, detail=f"App {app_id} not found")
-        
+
+        claims = getattr(request.state, "jwt_claims", None)
+        if claims is not None and not claims.get("super"):
+            if claims.get("apps", {}).get(app.name, "none") == "none":
+                raise HTTPException(status_code=403, detail="Token not scoped to this app")
+        else:
+            user = _session_user(request)
+            if user is None:
+                # Session vanished after the middleware gate — fail closed.
+                raise HTTPException(status_code=401, detail="Authentication required")
+            if not user["is_superuser"] and \
+                    role_store.get_role(user["id"], app.name) == "none":
+                raise HTTPException(status_code=403, detail="No access to this app")
+
         return app.to_dict()
     except HTTPException:
         raise
