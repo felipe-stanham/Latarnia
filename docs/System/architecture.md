@@ -28,7 +28,12 @@ graph TB
             SysMon[System Monitor<br/>Hardware Metrics]
             MCPGateway[MCP Gateway<br/>/mcp SSE endpoint]
             CaddyMgr[CaddyConfigManager<br/>generates Caddyfile + reload]
-            AuthVerify[/auth/verify<br/>session validation]
+            AuthVerify[/auth/verify<br/>session validation + role lookup]
+            AuthRoutes[/auth/* and /api/auth/*<br/>login, setup, users, tokens]
+            AuthDB[AuthDB<br/>platform DB init + migrations]
+            AuthProvider[TOTPAuthProvider<br/>AES-GCM encrypted TOTP]
+            SessionStore[SessionStore<br/>session create/validate/expire]
+            UserStore[UserStore<br/>user CRUD + setup tokens]
         end
 
         subgraph "Message Bus"
@@ -51,6 +56,10 @@ graph TB
             FileSystem[Shared Storage<br/>/opt/latarnia/]
             CaddyFile[Caddyfile include<br/>/opt/latarnia/{env}/caddy/]
         end
+
+        subgraph "Platform Auth DB"
+            PlatformDB[(latarnia_platform_{env}<br/>Postgres)]
+        end
     end
 
     User --> Browser
@@ -58,8 +67,17 @@ graph TB
     MCPClient -->|HTTPS + Bearer JWT| CaddyHTTPS
 
     CaddyHTTPS -->|forward_auth| AuthVerify
-    CaddyHTTPS -->|/auth/* no auth| FastAPI
+    CaddyHTTPS -->|/auth/* no auth| AuthRoutes
     CaddyHTTPS -->|after auth| FastAPI
+    AuthVerify --> SessionStore
+    AuthVerify --> UserStore
+    AuthRoutes --> AuthDB
+    AuthRoutes --> AuthProvider
+    AuthRoutes --> SessionStore
+    AuthRoutes --> UserStore
+    AuthDB --> PlatformDB
+    SessionStore --> PlatformDB
+    UserStore --> PlatformDB
     CaddyHTTPS -->|after auth, handle_path strips prefix| SvcApp1
     CaddyHTTPS -->|after auth, handle_path strips prefix| SvcApp2
     CaddyHTTPS -->|/apps/{name}/docs no auth| SvcApp1
@@ -230,6 +248,16 @@ graph TB
 - **Auth headers copied**: `X-Latarnia-User`, `X-Latarnia-App-Role`, `X-Latarnia-Is-Super`
 - **CaddyConfigManager** (`src/latarnia/caddy/manager.py`): reads the App Registry, generates the per-environment Caddyfile include at `/opt/latarnia/{env}/caddy/latarnia.caddyfile`, then reloads Caddy via `POST /load` on the Caddy admin API (`:2019`). Called on every App registration change.
 - **Firewall**: `ufw` blocks Latarnia `:8000` and app ports `:81xx` / `:90xx` from external access — all external traffic enters through Caddy only.
+
+### 13. Auth Components (P-0008 Scope 2)
+
+These components implement persistent authentication state. They all operate against `latarnia_platform_{env}` and are distinct from the per-app DB Provisioner path.
+
+- **AuthDB** (`src/latarnia/auth/db.py`): Creates `latarnia_platform_{env}` at startup and applies pending platform migrations from `src/latarnia/auth/migrations/` using the same sequential runner and `schema_versions` checksum pattern as the DB Provisioner.
+- **AuthProvider / TOTPAuthProvider** (`src/latarnia/auth/providers/`): `AuthProvider` is a Protocol defining `setup_credentials`, `validate`, and `get_setup_form_spec`. `TOTPAuthProvider` is the V1 implementation — generates TOTP secrets, encrypts them with AES-256-GCM (key from `LATARNIA_TOTP_ENC_KEY` in `secrets.env`), and validates TOTP codes.
+- **UserStore** (`src/latarnia/auth/users.py`): User CRUD — create user with setup token, list, deactivate. The first user created via `/auth/setup` becomes the superuser.
+- **SessionStore** (`src/latarnia/auth/sessions.py`): Session create/validate/expire. Cookie value is a random UUIDv4; only its SHA-256 hash is stored. Expired sessions are lazily garbage-collected at login time.
+- **Auth Routes** (`src/latarnia/auth/routes.py`): FastAPI router mounting `/auth/*` (login, setup, logout — browser flows) and `/api/auth/*` (user management, machine token management — JSON API). The `/auth/verify` endpoint is the Caddy `forward_auth` target; it validates the session hash and returns `X-Latarnia-User`, `X-Latarnia-App-Role`, and `X-Latarnia-Is-Super` headers.
 
 ## Application Types
 

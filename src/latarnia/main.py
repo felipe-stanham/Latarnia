@@ -2,7 +2,9 @@
 Main FastAPI application for Latarnia
 """
 import asyncio
+import base64
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
@@ -88,6 +90,26 @@ async def lifespan(app: FastAPI):
         logger.info("Postgres is reachable")
     else:
         logger.warning("Postgres is not reachable — app auto-start will be skipped")
+
+    # Initialize the platform auth DB (create + migrate). Requires Postgres.
+    if pg_ok:
+        logger.info("Initializing platform auth DB (%s)...", auth_db.db_name)
+        if auth_db.initialize():
+            logger.info("Platform auth DB ready")
+        else:
+            logger.error("Auth DB init failed — auth endpoints will be unavailable")
+    else:
+        logger.warning("Skipping auth DB init — Postgres unreachable")
+
+    # Fail loud-but-soft if the TOTP encryption key is absent: TOTP setup and
+    # login can't work without it. Logged once at startup with a clear fix.
+    try:
+        _totp_key_loader()
+    except Exception:
+        logger.error(
+            "LATARNIA_TOTP_ENC_KEY is missing or invalid — TOTP setup/login "
+            "will fail. Add a 32-byte base64 key to secrets.env (mode 600)."
+        )
 
     # Linger check: per-app user units only survive logout when linger is on.
     # Warn loudly but do not block startup — the main platform itself runs as
@@ -285,6 +307,47 @@ from .caddy import CaddyConfigManager
 caddy_manager = CaddyConfigManager(config_manager, app_manager)
 app_manager.caddy_manager = caddy_manager
 
+# Initialize auth foundation (P-0008 Scope 2). Platform auth state lives in
+# `latarnia_platform_{env}`; the DB is created + migrated at startup.
+from .auth import AuthDB
+from .auth.users import UserStore
+from .auth.sessions import SessionStore
+from .auth.providers import TOTPAuthProvider
+from .auth.routes import build_auth_router
+
+
+def _load_platform_secret(name: str) -> Optional[str]:
+    """Read a platform-wide secret from the env, then the master secrets file.
+
+    These (LATARNIA_TOTP_ENC_KEY, LATARNIA_JWT_SECRET) are platform-level, not
+    per-app, so they are read directly from the master file rather than via the
+    per-app filtered view. Never logged.
+    """
+    val = os.environ.get(name)
+    if not val:
+        val = secret_manager.load().get(name)
+    return val
+
+
+def _totp_key_loader() -> bytes:
+    raw = _load_platform_secret("LATARNIA_TOTP_ENC_KEY")
+    if not raw:
+        raise ValueError(
+            "LATARNIA_TOTP_ENC_KEY is not set (add it to secrets.env, mode 600)"
+        )
+    return base64.b64decode(raw)
+
+
+auth_db = AuthDB(config_manager, pg_client)
+user_store = UserStore(auth_db)
+session_store = SessionStore(auth_db, config_manager)
+totp_provider = TOTPAuthProvider(
+    auth_db, _totp_key_loader, issuer=config_manager.config.auth.totp_issuer
+)
+auth_router = build_auth_router(
+    auth_db, user_store, session_store, totp_provider, config_manager,
+)
+
 
 # Create FastAPI app
 app = FastAPI(
@@ -293,6 +356,10 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan
 )
+
+# Include auth routes (/auth/* and /api/auth/*) — must be reachable without a
+# session (Caddy routes /auth/* publicly; verify is the forward_auth target).
+app.include_router(auth_router)
 
 # Include web dashboard routes
 app.include_router(dashboard_router)

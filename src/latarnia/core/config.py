@@ -67,6 +67,18 @@ class MCPConfig(BaseModel):
     tool_sync_interval_seconds: int = 300
 
 
+class AuthConfig(BaseModel):
+    """Authentication / authorization settings (P-0008)."""
+    # Session cookie lifetime. Sessions live in the platform DB; this is the
+    # TTL stamped on each session row at login.
+    session_ttl_hours: int = 8
+    # One-time setup-token lifetime for invited users.
+    setup_token_ttl_hours: int = 24
+    cookie_name: str = "latarnia_session"
+    # TOTP issuer label shown in authenticator apps.
+    totp_issuer: str = "Latarnia"
+
+
 class LatarniaConfig(BaseSettings):
     redis: RedisConfig = Field(default_factory=RedisConfig)
     postgres: PostgresConfig = Field(default_factory=PostgresConfig)
@@ -76,6 +88,7 @@ class LatarniaConfig(BaseSettings):
     health_check_interval_seconds: int = 60
     system: SystemConfig = Field(default_factory=SystemConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
+    auth: AuthConfig = Field(default_factory=AuthConfig)
 
     class Config:
         env_prefix = "LATARNIA_"
