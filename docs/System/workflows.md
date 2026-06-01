@@ -383,7 +383,126 @@ sequenceDiagram
     Dash->>Dash: Format timestamps,<br/>extract messages
 ```
 
-## 10. Caddy Ingress — App Request Flow
+## 10. Role-Based App Tile Filtering and forward_auth Role Injection
+
+How the dashboard filters app tiles server-side by role and how `/auth/verify` injects per-app role headers into every forwarded request. References cap-015, cap-016, flow-03 in P-0008.
+
+```mermaid
+sequenceDiagram
+    participant Browser as User Browser
+    participant Caddy
+    participant AV as /auth/verify
+    participant RS as RoleStore
+    participant DB as latarnia_platform_{env}
+    participant Dash as Dashboard /api/apps
+
+    Note over Browser,Dash: Dashboard load — server-side tile filtering
+
+    Browser->>Caddy: GET / [Cookie: latarnia_session=abc]
+    Caddy->>AV: GET /auth/verify [X-Forwarded-Uri: /]
+    AV->>DB: Validate session hash
+    AV->>RS: get_role(user_id, app_name) for X-Forwarded-Uri app
+    AV-->>Caddy: 200 [X-Latarnia-User: uid, X-Latarnia-App-Role: webUI-med, X-Latarnia-Is-Super: false]
+    Caddy->>Dash: GET /api/apps [X-Latarnia-User: uid, X-Latarnia-Is-Super: false]
+    Dash->>RS: get_role(uid, app) for each app in registry
+    Note over Dash: Filter: hide tiles where role = none<br/>Superuser bypasses filter (all apps visible, role = full)
+    Dash-->>Browser: App list (only apps with role != none)
+
+    Note over Browser,DB: Protected app request — role injected into proxy headers
+
+    Browser->>Caddy: GET /apps/crm/dashboard [Cookie: ...]
+    Caddy->>AV: GET /auth/verify [X-Forwarded-Uri: /apps/crm/dashboard, Cookie: ...]
+    AV->>DB: Validate session
+    AV->>RS: get_role(uid, "crm")
+    AV-->>Caddy: 200 [X-Latarnia-User: uid, X-Latarnia-App-Role: webUI-med, X-Latarnia-Is-Super: false]
+    Caddy->>Caddy: Copy X-Latarnia-* headers to upstream
+    Note right of Caddy: App receives role header;<br/>may adjust content accordingly
+```
+
+Role assignment is managed via `GET /api/auth/roles`, `GET /api/auth/roles/all` (superuser only), and `POST /api/auth/roles/{app}` (superuser only). The `RoleStore` (`src/latarnia/auth/roles.py`) reads and writes the `app_roles` table; default effective role for any unassigned (user, app) pair is `none`.
+
+## 11. JWT Machine Token Issuance and API Call
+
+How machine clients (scripts, AI agents) obtain and use long-lived JWT tokens to call the Latarnia REST API. References cap-019, cap-020, flow-04 in P-0008.
+
+```mermaid
+sequenceDiagram
+    actor Operator
+    participant Dashboard as Dashboard (API Tokens modal)
+    participant Auth as /api/auth/tokens
+    participant MTS as MachineTokenStore
+    participant DB as latarnia_platform_{env}
+    actor Client as Machine Client
+
+    Note over Operator,DB: Token creation (one-time, requires superuser session)
+
+    Operator->>Dashboard: POST /api/auth/tokens {label, app_scope, expires_at}
+    Dashboard->>Auth: (superuser session cookie required)
+    Auth->>MTS: create(label, app_scope, expires_at, granted_by)
+    MTS->>MTS: Sign HS256 JWT {sub, iat, exp, apps, super}
+    MTS->>DB: INSERT machine_tokens (token_hash=SHA256(jwt), app_scope, ...)
+    MTS-->>Auth: raw JWT string
+    Auth-->>Dashboard: {token: "<raw_jwt>"}
+    Dashboard-->>Operator: Show token once (plaintext never stored)
+
+    Note over Client,DB: API call with Bearer token
+
+    Client->>Client: GET /api/apps\nAuthorization: Bearer <jwt>
+    Note over Client: JWTAuthMiddleware intercepts all /api/* requests
+
+    Client->>Client: JWTAuthMiddleware.validate_jwt(token)
+    Client->>DB: SELECT machine_tokens WHERE token_hash=SHA256(jwt) AND revoked_at IS NULL
+    alt JWT invalid, expired, or revoked
+        Client-->>Client: 401 Unauthorized
+    else Valid
+        Client->>Client: Extract app_scope from JWT claims
+        Client-->>Client: 200 OK (response filtered to apps in scope)
+    end
+
+    Note over Operator,DB: Token management
+    Operator->>Auth: GET /api/auth/tokens  →  list active tokens (no plaintext values)
+    Operator->>Auth: DELETE /api/auth/tokens/{id}  →  set revoked_at = now()
+```
+
+`LATARNIA_JWT_SECRET` (from `secrets.env`) is the HS256 signing key. Token creation requires a superuser session if any app in `app_scope` carries the `full` role.
+
+## 12. MCP Gateway Bearer Auth Flow
+
+How an AI agent authenticates to the MCP Gateway with a Bearer JWT and receives a scoped tool list. References cap-021, flow-06 in P-0008.
+
+```mermaid
+sequenceDiagram
+    actor Agent as AI Agent (e.g. Claude Desktop)
+    participant Caddy
+    participant GW as MCP Gateway /mcp/sse
+    participant DB as latarnia_platform_{env}
+    participant AppMCP as App MCP Server
+
+    Agent->>Caddy: GET /mcp/sse\nAuthorization: Bearer <jwt>
+    Note over Caddy: catch-all forward_auth runs but<br/>MCP gateway validates JWT internally
+    Caddy->>GW: Proxy request (Bearer header forwarded)
+
+    GW->>GW: Validate JWT signature + expiry
+    GW->>DB: SELECT machine_tokens WHERE token_hash=SHA256(jwt) AND revoked_at IS NULL
+    alt Invalid or revoked
+        GW-->>Agent: 401 Unauthorized
+    else Valid
+        GW->>GW: Extract app_scope from JWT claims (ContextVar per connection)
+        Note over GW: Tool list filtered to apps the token has access to
+        GW->>AppMCP: Connect to app MCP server\nX-Latarnia-App-Role: <role_from_scope>
+        GW-->>Agent: SSE stream open; aggregated tool list (scoped)
+
+        Agent->>GW: call_tool(app.tool_name, args)
+        GW->>GW: Check token has access to app
+        GW->>AppMCP: Forward call with X-Latarnia-App-Role header
+        AppMCP-->>GW: Tool result
+        GW-->>Agent: Tool result
+    end
+```
+
+The MCP Gateway uses a per-connection `ContextVar` to carry the token's app scope — this isolates concurrent connections. Websocket and `/mcp` traffic passes through `JWTAuthMiddleware` without session-cookie gating; JWT is the sole credential path for machine clients on `/mcp`.
+
+## 13. Caddy Ingress — App Request Flow
 
 How external browser requests reach Service App web UIs via Caddy (P-0008 Scope 1). The platform's Python web proxy was removed; Caddy is now the sole reverse proxy for app traffic. References P-0008 architecture.
 

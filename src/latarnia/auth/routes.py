@@ -15,9 +15,12 @@ import base64
 import io
 import logging
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
+
+from .roles import ROLE_VALUES
 
 import qrcode
 from qrcode.image.pure import PyPNGImage
@@ -80,12 +83,14 @@ def _extract_app_name(forwarded_uri: str) -> Optional[str]:
 
 
 def build_auth_router(auth_db, user_store, session_store, totp_provider,
-                      config_manager, role_store=None, app_manager=None) -> APIRouter:
+                      config_manager, role_store=None, app_manager=None,
+                      jwt_auth=None, token_store=None) -> APIRouter:
     """Assemble the auth router.
 
     `role_store` (RoleStore) is optional. When absent (pre-Scope-3), app role
     resolves to 'full' for superusers and 'none' otherwise. `app_manager`, when
-    provided, lets role assignment reject unknown app names.
+    provided, lets role assignment reject unknown app names. `jwt_auth` +
+    `token_store` (Scope 4) enable the machine-token endpoints.
     """
     router = APIRouter()
     cookie_name = config_manager.config.auth.cookie_name
@@ -365,5 +370,59 @@ def build_auth_router(auth_db, user_store, session_store, totp_provider,
             raise HTTPException(status_code=400, detail=str(exc))
         return {"success": True, "app_name": app_name, "role": role,
                 "user_id": str(target_user_id)}
+
+    # ------------------------------------------------------------------
+    # Machine tokens (JWT) — Scope 4
+    # ------------------------------------------------------------------
+
+    @router.post("/api/auth/tokens")
+    async def create_token(request: Request):
+        actor = _require_user(request)
+        if token_store is None:
+            raise HTTPException(status_code=503, detail="Token store unavailable")
+        body = await request.json() or {}
+        label = (body.get("label") or "").strip()
+        app_scope = body.get("app_scope") or {}
+        if not label:
+            raise HTTPException(status_code=400, detail="label is required")
+        if not isinstance(app_scope, dict):
+            raise HTTPException(status_code=400, detail="app_scope must be an object")
+        for app_name, role in app_scope.items():
+            if role not in ROLE_VALUES:
+                raise HTTPException(status_code=400, detail=f"invalid role: {role}")
+            # Superuser required to mint a token carrying a `full` grant.
+            if role == "full" and not actor["is_superuser"]:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Only a superuser can issue a token with the 'full' role",
+                )
+        expires_at = None
+        raw_exp = body.get("expires_at")
+        if raw_exp:
+            try:
+                expires_at = datetime.fromisoformat(str(raw_exp).replace("Z", "+00:00"))
+            except ValueError:
+                raise HTTPException(status_code=400, detail="expires_at must be ISO-8601")
+        raw = token_store.create_token(
+            actor["id"], label, app_scope, is_super=actor["is_superuser"],
+            granted_by=actor["id"], expires_at=expires_at,
+        )
+        return {"token": raw}
+
+    @router.get("/api/auth/tokens")
+    async def list_tokens(request: Request):
+        actor = _require_user(request)
+        if token_store is None:
+            return {"tokens": []}
+        return {"tokens": token_store.list_tokens(actor["id"])}
+
+    @router.delete("/api/auth/tokens/{token_id}")
+    async def revoke_token(request: Request, token_id: str):
+        actor = _require_user(request)
+        if token_store is None:
+            raise HTTPException(status_code=503, detail="Token store unavailable")
+        if not token_store.revoke(token_id, actor["id"]):
+            raise HTTPException(status_code=404, detail="Token not found")
+        return {"success": True, "message": "Token revoked"}
 
     return router

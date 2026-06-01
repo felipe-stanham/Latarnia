@@ -5,6 +5,7 @@
     <h1 class="h3 mb-0">Latarnia Dashboard</h1>
     <div class="text-end">
       <span id="hh-user-chip" class="me-2"></span>
+      <button id="hh-api-tokens-btn" class="btn btn-outline-dark btn-sm" style="display:none">🔑 API Tokens</button>
       <button id="hh-users-roles-btn" class="btn btn-outline-dark btn-sm" style="display:none">👥 Users &amp; Roles</button>
       <button id="hh-refresh-all" class="btn btn-outline-primary btn-sm">🔄 Refresh</button>
       <button onclick="viewLatarniaLogs()" class="btn btn-outline-secondary btn-sm">📋 Latarnia Logs</button>
@@ -183,12 +184,54 @@
       </div>
     </div>
   </div>
+
+  <!-- API Tokens Modal -->
+  <div class="modal fade" id="apiTokensModal" tabindex="-1" aria-labelledby="apiTokensModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title" id="apiTokensModalLabel">API Tokens</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <div id="hh-token-result" class="alert alert-warning small" style="display:none"></div>
+
+          <h6 class="mb-2">Your tokens</h6>
+          <div id="hh-tokens-list"><div class="text-center text-muted py-2">Loading…</div></div>
+
+          <hr>
+          <h6 class="mb-2">New token</h6>
+          <div class="mb-2">
+            <label class="form-label mb-1">Label</label>
+            <input id="hh-token-label" type="text" class="form-control form-control-sm" placeholder="e.g. claude-agent">
+          </div>
+          <div class="mb-2">
+            <label class="form-label mb-1">Expires</label>
+            <input id="hh-token-expiry" type="date" class="form-control form-control-sm">
+            <small class="text-muted">Leave blank for never.</small>
+          </div>
+          <label class="form-label mb-1">App access</label>
+          <div id="hh-token-super-note" class="text-warning small mb-1" style="display:none">
+            Note: as a superuser, tokens you create have full access to all apps — the scope below is informational.
+          </div>
+          <div id="hh-token-scope"><div class="text-muted small">Loading apps…</div></div>
+          <button id="hh-token-generate" class="btn btn-sm btn-success mt-2">Generate Token</button>
+        </div>
+      </div>
+    </div>
+  </div>
 {% endblock %}
 
 {% block extra_scripts %}
 <script>
   async function fetchJson(url) {
     const resp = await fetch(url);
+    if (resp.status === 401) {
+      // Not authenticated (e.g. session expired, or direct dev access) —
+      // bounce to login. In prod Caddy gates the dashboard before this.
+      window.location.href = "/auth/login";
+      throw new Error("Unauthorized");
+    }
     if (!resp.ok) {
       throw new Error(`Request failed: ${resp.status}`);
     }
@@ -1109,12 +1152,14 @@
       const chip = document.getElementById("hh-user-chip");
       chip.innerHTML = `<span class="badge bg-secondary">${esc(currentUsername)}${isSuper ? " ★ superuser" : ""}</span>`;
       document.getElementById("hh-signout-btn").style.display = "inline-block";
+      document.getElementById("hh-api-tokens-btn").style.display = "inline-block";
       document.getElementById("hh-users-roles-btn").style.display = isSuper ? "inline-block" : "none";
     } catch (err) {
       // No session (e.g. direct dev access without Caddy) — clear context.
       roleMap = {}; isSuper = false; currentUsername = "";
       document.getElementById("hh-user-chip").innerHTML = "";
       document.getElementById("hh-signout-btn").style.display = "none";
+      document.getElementById("hh-api-tokens-btn").style.display = "none";
       document.getElementById("hh-users-roles-btn").style.display = "none";
     }
   }
@@ -1243,6 +1288,88 @@
       alert(`Failed: ${err.message}`);
     }
   });
+
+  // ---------------------------------------------------------------------
+  // API Tokens (P-0008 Scope 4)
+  // ---------------------------------------------------------------------
+  document.getElementById("hh-api-tokens-btn").addEventListener("click", async () => {
+    document.getElementById("hh-token-result").style.display = "none";
+    document.getElementById("hh-token-super-note").style.display = isSuper ? "block" : "none";
+    new bootstrap.Modal(document.getElementById("apiTokensModal")).show();
+    await Promise.all([loadTokens(), loadTokenScopeForm()]);
+  });
+
+  async function loadTokens() {
+    const el = document.getElementById("hh-tokens-list");
+    el.innerHTML = '<div class="text-center text-muted py-2">Loading…</div>';
+    try {
+      const data = await fetchJson("/api/auth/tokens");
+      const tokens = data.tokens || [];
+      if (!tokens.length) { el.innerHTML = '<p class="text-muted small mb-0">No tokens yet.</p>'; return; }
+      el.innerHTML = '<table class="table table-sm"><thead><tr><th>Label</th><th>Apps</th><th>Expires</th><th>Status</th><th></th></tr></thead><tbody>' +
+        tokens.map(t => {
+          const apps = Object.entries(t.app_scope || {}).map(([a, r]) => `${esc(a)} (${esc(r)})`).join("<br>") || "<span class='text-muted'>none</span>";
+          const exp = t.expires_at ? esc(t.expires_at.slice(0, 10)) : "Never";
+          const revoked = !!t.revoked_at;
+          const status = revoked ? '<span class="badge bg-secondary">revoked</span>' : '<span class="badge bg-success">active</span>';
+          const action = revoked ? "" : `<button class="btn btn-sm btn-outline-danger" onclick="revokeToken('${t.id}')">Revoke</button>`;
+          return `<tr><td>${esc(t.label)}</td><td class="small">${apps}</td><td>${exp}</td><td>${status}</td><td>${action}</td></tr>`;
+        }).join("") + '</tbody></table>';
+    } catch (err) { el.innerHTML = `<div class="alert alert-danger small">${esc(err.message)}</div>`; }
+  }
+
+  async function loadTokenScopeForm() {
+    const el = document.getElementById("hh-token-scope");
+    try {
+      const data = await fetchJson("/api/apps");
+      const apps = (data.apps || []).map(a => a.name).sort();
+      if (!apps.length) { el.innerHTML = '<div class="text-muted small">No apps available.</div>'; return; }
+      el.innerHTML = apps.map(name => {
+        const opts = ROLE_OPTIONS.map(r => `<option value="${r}">${r}</option>`).join("");
+        return `<div class="d-flex align-items-center gap-2 mb-1"><span class="small" style="width:160px">${esc(name)}</span>
+          <select class="form-select form-select-sm" data-app="${esc(name)}" style="width:160px">${opts}</select></div>`;
+      }).join("");
+    } catch (err) { el.innerHTML = `<div class="text-danger small">${esc(err.message)}</div>`; }
+  }
+
+  document.getElementById("hh-token-generate").addEventListener("click", async () => {
+    const label = document.getElementById("hh-token-label").value.trim();
+    if (!label) { alert("Label is required"); return; }
+    const expiryVal = document.getElementById("hh-token-expiry").value;
+    const scope = {};
+    document.querySelectorAll("#hh-token-scope select").forEach(sel => {
+      if (sel.value && sel.value !== "none") scope[sel.dataset.app] = sel.value;
+    });
+    const bodyObj = { label, app_scope: scope };
+    if (expiryVal) bodyObj.expires_at = expiryVal + "T00:00:00Z";  // UTC
+    try {
+      const resp = await fetch("/api/auth/tokens", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(bodyObj),
+      });
+      const data = await resp.json().catch(() => ({}));
+      const result = document.getElementById("hh-token-result");
+      if (!resp.ok) {
+        result.className = "alert alert-danger small";
+        result.textContent = `Failed: ${data.detail || resp.status}`;
+      } else {
+        result.className = "alert alert-warning small";
+        result.innerHTML = `⚠ Copy this token now — it won't be shown again:<br><code style="word-break:break-all">${esc(data.token)}</code>`;
+        document.getElementById("hh-token-label").value = "";
+        await loadTokens();
+      }
+      result.style.display = "block";
+    } catch (err) { alert(`Failed: ${err.message}`); }
+  });
+
+  async function revokeToken(id) {
+    if (!confirm("Revoke this token? Clients using it will be denied.")) return;
+    try {
+      const resp = await fetch(`/api/auth/tokens/${id}`, { method: "DELETE" });
+      if (!resp.ok) { const d = await resp.json().catch(() => ({})); alert(`Failed: ${d.detail || resp.status}`); return; }
+      await loadTokens();
+    } catch (err) { alert(`Failed: ${err.message}`); }
+  }
 
   // Initial load
   refreshDashboard();
