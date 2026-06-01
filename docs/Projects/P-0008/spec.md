@@ -6,10 +6,10 @@ Latarnia has no authentication or transport security. The dashboard, all REST AP
 
 ## Context & Constraints
 
-- **Single-user home server** — no multi-tenancy. One operator (superuser), optional additional users with scoped access.
+- **Multi-user home server** — one operator (superuser) who manages users and assigns per-app roles. Additional users can be added by the superuser. V1 supports full multi-user operation from day one.
 - **Existing proxy:** `web_proxy.py` (`WebProxyManager`) handles app webUI forwarding. It must be deleted and replaced by Caddy.
 - **Existing infrastructure:** Caddy is the chosen replacement per the V2 framing in `docs/SYSTEM.md`. Postgres is the platform DB (already provisioned cluster-wide). Redis and systemd are in place.
-- **No password management:** The operator does not want to manage passwords. Authentication is via TOTP (RFC 6238 — Google Authenticator, Microsoft Authenticator, Authy, etc.).
+- **Auth method V1 — TOTP:** The operator does not want to manage passwords. Authentication is via TOTP (RFC 6238 — Google Authenticator, Microsoft Authenticator, Authy, etc.). TOTP is implemented behind an `AuthProvider` protocol so future methods (password, passkey, OAuth2) can be added without touching sessions, routes, or role logic.
 - **Port isolation:** Firewall (ufw) blocks external access to all app and platform ports. Only Caddy's HTTPS port is reachable from outside localhost.
 - **Multi-environment:** PRD and TST co-exist on the same Pi. Caddy serves both on different ports. Each Latarnia environment manages its own Caddyfile section.
 
@@ -19,7 +19,7 @@ Replace `web_proxy.py` with Caddy as the single ingress for all Latarnia traffic
 
 ### Main actors
 - **Operator (superuser):** manages users, assigns roles, generates machine tokens
-- **User:** authenticates via TOTP, accesses dashboard and apps per assigned roles
+- **User:** authenticates via the platform's configured auth method (V1: TOTP), accesses dashboard and apps per assigned roles
 - **Machine client:** authenticates via JWT Bearer token (for REST API / MCP access)
 
 ### Capabilities
@@ -35,11 +35,12 @@ Replace `web_proxy.py` with Caddy as the single ingress for all Latarnia traffic
 
 **Auth Foundation**
 - **cap-008:** Platform Postgres DB (`latarnia_platform_{env}`) created at Latarnia startup with auth schema migrations applied
-- **cap-009:** TOTP first-run setup at `GET /auth/setup` — generates TOTP secret, displays QR code, requires first valid code to confirm; locked after setup
-- **cap-010:** TOTP login at `GET/POST /auth/login` — accepts 6-digit code, validates, issues session cookie (HTTP-only, Secure, SameSite=Strict)
+- **cap-009:** TOTP first-run setup at `GET /auth/setup` — when no users exist, generates TOTP secret, displays QR code, requires first valid code to confirm; the first user is the superuser. Subsequent users are added via `POST /api/auth/users` (superuser only), which generates a one-time setup token and returns a setup URL; the invitee visits `/auth/setup?token=<setup_token>` to complete TOTP enrollment.
+- **cap-010:** Login at `GET/POST /auth/login` — accepts username + 6-digit TOTP code, looks up the user's credentials, validates, issues session cookie (HTTP-only, Secure, SameSite=Strict)
 - **cap-011:** Session lifecycle — sessions stored in DB with expiry (configurable TTL, default 8h); expired sessions redirect to login
 - **cap-012:** `/auth/verify` endpoint — validates session cookie, extracts app name from `X-Forwarded-Uri`, looks up user's role for that app, returns `X-Latarnia-User`, `X-Latarnia-App-Role`, `X-Latarnia-Is-Super` headers; returns 200 (proceed) or 401 (redirect to login)
-- **cap-013:** User record in `latarnia_platform_{env}` — single user for V1; TOTP secret stored AES-256 encrypted using `LATARNIA_TOTP_ENC_KEY` from `secrets.env`
+- **cap-013:** Auth credentials stored in `user_credentials` table (separate from `users`) keyed by `auth_method`; V1 method is `totp`; TOTP secret stored AES-256-GCM encrypted in `credential_data` jsonb using `LATARNIA_TOTP_ENC_KEY` from `secrets.env`. The `AuthProvider` protocol abstracts method-specific logic from routes, sessions, and role enforcement.
+- **cap-024:** User management — `POST /api/auth/users` (superuser only) creates a user and returns a one-time setup URL (expires 24h); `GET /api/auth/users` lists all users; `DELETE /api/auth/users/{id}` deactivates a user (invalidates all their sessions)
 
 **Role Model & Authorization**
 - **cap-014:** Per-app role assignment stored in DB — roles: `none`, `webUI-low`, `webUI-med`, `webUI-full`, `full`; default for new users is `none` for all apps
@@ -87,14 +88,21 @@ Replace `web_proxy.py` with Caddy as the single ingress for all Latarnia traffic
 - `WebProxyManager` is not imported or instantiated anywhere
 
 ### cap-009
-- First visit to `/auth/setup` with no users in DB renders a QR code page
-- Submitting a valid TOTP code completes setup; subsequent visit to `/auth/setup` redirects to `/auth/login`
+- First visit to `/auth/setup` with no users in DB renders a QR code page; submitting a valid code creates the superuser and redirects to `/`
 - Submitting an invalid code returns an error and stays on setup page
+- `POST /api/auth/users` by superuser returns a one-time setup URL; visiting `/auth/setup?token=<setup_token>` renders QR code for the new user; completing setup activates the user; the setup token is consumed (single use, expires 24h)
+- Visiting `/auth/setup` with no token after users already exist redirects to `/auth/login`
 
 ### cap-010
-- Valid TOTP code → 302 redirect to `/` with `latarnia_session` cookie set
-- Invalid TOTP code → error message, no cookie
+- Login page has both username and TOTP code fields
+- Valid username + TOTP code → 302 redirect to `/` with `latarnia_session` cookie set
+- Invalid username or TOTP code → error message, no cookie
 - Replayed code (same code used twice within 30s window) → rejected
+
+### cap-024
+- `GET /api/auth/users` (superuser only) returns list of users with id, username, is_superuser, created_at, last_login_at
+- `POST /api/auth/users` (superuser only) returns `{setup_url}` with a token valid 24h; non-superuser → 403
+- `DELETE /api/auth/users/{id}` deactivates user and invalidates all their active sessions; deactivated user cannot log in; superuser cannot deactivate themselves
 
 ### cap-011
 - Session cookie with TTL 8h is valid for 8h; after expiry, `/auth/verify` returns 401
@@ -155,7 +163,8 @@ See `workflows.md#flow-05`
 ## Technical Considerations
 
 - **Caddy admin API** (`localhost:2019`) used for `caddy reload`. Latarnia calls `curl -X POST localhost:2019/load` with the new config after writing the Caddyfile. The admin API must be bound to localhost only.
-- **TOTP secret encryption:** AES-256-GCM using `LATARNIA_TOTP_ENC_KEY` (32-byte base64 key stored in `secrets.env`). Key is loaded into memory at startup; plaintext secret is never written to disk or logged.
+- **AuthProvider protocol:** `src/latarnia/auth/providers/base.py` defines `AuthProvider` (a Python `Protocol`) with methods: `setup_credentials(user_id, **kwargs) → dict` (returns setup data, e.g. QR URI), `validate(user_id, submission: dict) → bool` (validates a login attempt), `get_setup_form_spec() → dict` (UI hints for the setup page). `TOTPAuthProvider` in `src/latarnia/auth/providers/totp.py` is the V1 implementation. Routes call the registered provider — they do not know it is TOTP.
+- **TOTP secret encryption:** AES-256-GCM using `LATARNIA_TOTP_ENC_KEY` (32-byte base64 key stored in `secrets.env`). Key is loaded into memory at startup; plaintext secret is never written to disk or logged. Encrypted value stored in `user_credentials.credential_data` jsonb under `totp_secret_enc`.
 - **JWT signing:** HS256 with `LATARNIA_JWT_SECRET` from `secrets.env`. JWTs contain: `sub` (user_id), `iat`, `exp`, `apps` (dict of app_name → role), `super` (bool).
 - **Session cookie:** `latarnia_session=<opaque_token>` — the token is a random UUID stored hashed (SHA-256) in the sessions table. Not a JWT — opaque by design to allow server-side revocation.
 - **Domain configuration:** Domain is not hardcoded. `CaddyConfigManager.generate_config()` reads `{ENV}_DOMAIN` from the platform config (e.g., `PRD_DOMAIN=home.stanham.com`). If the domain is `localhost` or empty, Caddy uses its automatic self-signed cert (dev). If the domain is a real hostname, Caddy provisions a Let's Encrypt cert automatically via ACME HTTP-01. No `tls` directive is needed in the Caddyfile — Caddy infers the appropriate method from the site address.
@@ -175,8 +184,8 @@ See `workflows.md#flow-05`
 - **Session on Pi restart:** Sessions in DB survive Pi restarts (no TTL loss). Caddy restarts also safe (stateless).
 
 ### Rabbit Holes — DO NOT GO THERE
-- **OAuth2 / OIDC integration** — Out of scope. TOTP is sufficient.
-- **Multi-user TOTP with email invites** — V1 is single-user. User management UI is for role assignment only.
+- **OAuth2 / OIDC integration** — Out of scope for V1. The `AuthProvider` protocol makes this addable later without changing existing code.
+- **Email invites for new users** — Out of scope. Superuser creates users and hands the setup URL to them directly (home server context).
 - **Caddy plugins / custom middleware** — Use stock Caddy with `forward_auth` only. No custom Caddy plugins.
 - **Per-endpoint role granularity** — Roles are per-app, not per-endpoint. Apps that need endpoint-level control use the role header themselves.
 - **Token refresh flow** — Machine tokens are long-lived by default. No refresh token mechanism.
@@ -204,8 +213,8 @@ See `workflows.md#flow-05`
 - `example_full_app` update
 
 ### OUT
-- OAuth2, OIDC, SSO
-- Email OTP (TOTP only)
+- OAuth2, OIDC, SSO (AuthProvider protocol makes this addable later)
+- Email OTP (TOTP only in V1)
 - Multi-factor recovery codes (V2 if needed)
 - Per-endpoint role granularity (apps own this)
 - Rate limiting (future scope)
@@ -213,3 +222,4 @@ See `workflows.md#flow-05`
 - CertBot or any external cert manager — Caddy handles ACME natively
 - Streamlit app auth (inherits Caddy session transparently)
 - Cross-host routing
+- Self-service password reset or account recovery

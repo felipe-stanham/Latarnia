@@ -9,16 +9,40 @@ flowchart TD
     A([Browser: GET /]) --> B{Users exist in DB?}
     B -- No --> C[Redirect to /auth/setup]
     B -- Yes --> D[Normal auth flow]
-    C --> E[Latarnia generates TOTP secret\nAES-256-GCM encrypt and store in users table]
+    C --> E[TOTPAuthProvider.setup_credentials:\ngenerate TOTP secret, AES-256-GCM encrypt,\nwrite to user_credentials table]
     E --> F[Render setup page: QR code + manual key]
     F --> G([User scans QR code in Authenticator app])
     G --> H([User submits first 6-digit code])
-    H --> I{Valid TOTP code?}
+    H --> I{TOTPAuthProvider.validate?}
     I -- No --> F
-    I -- Yes --> J[Mark user as confirmed\nSet last_login_at]
+    I -- Yes --> J[Mark user as superuser\nSet last_login_at]
     J --> K[Issue session cookie]
     K --> L([Redirect to /])
     L --> M([Dashboard rendered])
+```
+
+## flow-01b: Superuser Adds a New User [cap-009, cap-024]
+
+After initial setup, superuser invites additional users.
+
+```mermaid
+flowchart TD
+    A([Superuser: Users & Roles tab]) --> B[Click Add User\nenter username]
+    B --> C[POST /api/auth/users]
+    C --> D[Create user row is_active=false\nGenerate setup_token expires 24h]
+    D --> E[Return setup_url]
+    E --> F([Superuser copies URL and sends to new user])
+    F --> G([New user: GET /auth/setup?token=setup_token])
+    G --> H{Token valid & not expired?}
+    H -- No --> I([Error: invalid or expired link])
+    H -- Yes --> J[TOTPAuthProvider.setup_credentials:\ngenerate secret, write to user_credentials]
+    J --> K[Render QR code page]
+    K --> L([New user scans QR, submits code])
+    L --> M{TOTPAuthProvider.validate?}
+    M -- No --> K
+    M -- Yes --> N[Set is_active=true, null out setup_token\nSet last_login_at]
+    N --> O[Issue session cookie]
+    O --> P([Redirect to /])
 ```
 
 ## flow-02: TOTP Login [cap-010, cap-011]
@@ -30,13 +54,15 @@ flowchart TD
     A([Browser: GET protected route]) --> B{Valid session cookie?}
     B -- Yes --> C[/auth/verify proceeds]
     B -- No --> D[Caddy redirects to /auth/login]
-    D --> E([User enters 6-digit TOTP code])
-    E --> F{Code valid & not replayed?}
+    D --> E([User enters username + 6-digit TOTP code])
+    E --> F{User exists & is_active?}
     F -- No --> G[Return error message]
     G --> E
-    F -- Yes --> H[Generate random UUID session token\nStore SHA-256 hash in sessions table\nSet expires_at = now + TTL]
-    H --> I[Set latarnia_session cookie\nHTTP-only, Secure, SameSite=Strict]
-    I --> J([Redirect to original destination])
+    F -- Yes --> H{TOTPAuthProvider.validate\ncode valid & not replayed?}
+    H -- No --> G
+    H -- Yes --> I[Generate random UUID session token\nStore SHA-256 hash in sessions table\nSet expires_at = now + TTL]
+    I --> J[Set latarnia_session cookie\nHTTP-only, Secure, SameSite=Strict]
+    J --> K([Redirect to original destination])
 ```
 
 ## flow-03: Caddy forward_auth with Role Injection [cap-004, cap-012, cap-015, cap-016]

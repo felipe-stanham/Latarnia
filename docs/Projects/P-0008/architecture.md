@@ -192,11 +192,13 @@ home.stanham.com:443 {
 | Module | Path | Responsibility |
 |---|---|---|
 | `auth.db` | `src/latarnia/auth/db.py` | Platform DB init, migration runner |
-| `auth.totp` | `src/latarnia/auth/totp.py` | TOTP secret gen, encryption, validation |
+| `auth.providers.base` | `src/latarnia/auth/providers/base.py` | `AuthProvider` Protocol — `setup_credentials`, `validate`, `get_setup_form_spec` |
+| `auth.providers.totp` | `src/latarnia/auth/providers/totp.py` | TOTP implementation of `AuthProvider` — secret gen, AES-GCM encryption, code validation |
 | `auth.sessions` | `src/latarnia/auth/sessions.py` | Session create/validate/expire |
 | `auth.roles` | `src/latarnia/auth/roles.py` | Role lookup, assignment, enforcement |
+| `auth.users` | `src/latarnia/auth/users.py` | User CRUD — create (with setup token), list, deactivate |
 | `auth.jwt` | `src/latarnia/auth/jwt.py` | JWT sign, validate, revocation check |
-| `auth.routes` | `src/latarnia/auth/routes.py` | `/auth/*` FastAPI router |
+| `auth.routes` | `src/latarnia/auth/routes.py` | `/auth/*` and `/api/auth/*` FastAPI router |
 | `auth.middleware` | `src/latarnia/auth/middleware.py` | JWT Bearer middleware for `/api/*` and `/mcp/*` |
 | `caddy.manager` | `src/latarnia/caddy/manager.py` | Caddyfile generation and reload |
 
