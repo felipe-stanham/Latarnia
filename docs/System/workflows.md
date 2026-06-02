@@ -479,7 +479,7 @@ sequenceDiagram
     participant AppMCP as App MCP Server
 
     Agent->>Caddy: GET /mcp/sse\nAuthorization: Bearer <jwt>
-    Note over Caddy: catch-all forward_auth runs but<br/>MCP gateway validates JWT internally
+    Note over Caddy: /mcp/* has NO forward_auth<br/>(gateway validates the JWT internally)
     Caddy->>GW: Proxy request (Bearer header forwarded)
 
     GW->>GW: Validate JWT signature + expiry

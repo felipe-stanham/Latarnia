@@ -253,8 +253,9 @@ graph TB
 - **Route structure** (generated per environment by `CaddyConfigManager`):
   - `/auth/*`, `/docs*`, `/openapi.json` — public, proxied to Latarnia `:8000`
   - `/apps/{name}/docs*`, `/apps/{name}/openapi.json` — public, proxied directly to app port (Service Apps only)
+  - `/api/*`, `/mcp/*` — proxied to Latarnia `:8000` **without** `forward_auth`; Latarnia authenticates internally (`JWTAuthMiddleware` accepts a Bearer JWT or session cookie on `/api/*`; the MCP gateway validates the Bearer JWT on `/mcp`). `forward_auth` only checks the session cookie, so it would reject machine tokens (T-0002).
   - `/apps/{name}/*` — protected via `forward_auth` to `/auth/verify`; Caddy strips the `/apps/{name}` prefix with `handle_path` before proxying to app port (Service Apps only; Streamlit Apps have no Caddy route block)
-  - `/*` catch-all — protected via `forward_auth`; proxied to Latarnia `:8000` (covers dashboard, `/api/*`, `/mcp/*`)
+  - `/*` catch-all — protected via `forward_auth`; proxied to Latarnia `:8000` (dashboard and other browser routes)
 - **Auth headers copied**: `X-Latarnia-User`, `X-Latarnia-App-Role`, `X-Latarnia-Is-Super`
 - **CaddyConfigManager** (`src/latarnia/caddy/manager.py`): reads the App Registry, generates the per-environment Caddyfile include at `/opt/latarnia/{env}/caddy/latarnia.caddyfile`, then reloads Caddy via `POST /load` on the Caddy admin API (`:2019`). Called on every App registration change.
 - **Firewall**: `ufw` blocks Latarnia `:8000` and app ports `:81xx` / `:90xx` from external access — all external traffic enters through Caddy only.

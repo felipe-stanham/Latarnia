@@ -53,6 +53,57 @@ def test_generate_dev_localhost_site_address(tmp_path, monkeypatch):
     assert "copy_headers X-Latarnia-User X-Latarnia-App-Role X-Latarnia-Is-Super" in config
 
 
+def _block_body(config: str, header: str) -> str:
+    """Return the text between a `handle ... {` header and its closing brace."""
+    start = config.index(header) + len(header)
+    depth = 1
+    i = start
+    while i < len(config) and depth > 0:
+        if config[i] == "{":
+            depth += 1
+        elif config[i] == "}":
+            depth -= 1
+        i += 1
+    return config[start:i]
+
+
+def test_api_block_has_no_forward_auth(tmp_path, monkeypatch):
+    # T-0002: /api/* must be proxied straight to Latarnia (Bearer JWT or
+    # session validated internally), NOT behind Caddy's session-only forward_auth.
+    mgr = _manager(tmp_path, [], monkeypatch, env="dev")
+    config = mgr.generate_config()
+    assert "handle /api/* {" in config
+    body = _block_body(config, "handle /api/* {")
+    assert "forward_auth" not in body
+    assert "reverse_proxy localhost:8000" in body
+
+
+def test_mcp_block_present_when_enabled_no_forward_auth(tmp_path, monkeypatch):
+    mgr = _manager(tmp_path, [], monkeypatch, env="dev")
+    mgr.config_manager.config.mcp.enabled = True
+    mgr.config_manager.config.mcp.gateway_path = "/mcp"
+    config = mgr.generate_config()
+    assert "handle /mcp/* {" in config
+    assert "forward_auth" not in _block_body(config, "handle /mcp/* {")
+
+
+def test_mcp_block_absent_when_disabled(tmp_path, monkeypatch):
+    mgr = _manager(tmp_path, [], monkeypatch, env="dev")
+    mgr.config_manager.config.mcp.enabled = False
+    config = mgr.generate_config()
+    assert "handle /mcp/* {" not in config
+
+
+def test_catch_all_still_protected(tmp_path, monkeypatch):
+    # The dashboard catch-all and per-app webUI keep forward_auth.
+    apps = [_make_app("my_app", port=8151)]
+    mgr = _manager(tmp_path, apps, monkeypatch, env="dev")
+    config = mgr.generate_config()
+    assert "forward_auth" in _block_body(config, "handle /* {")
+    assert "uri /auth/verify" in _block_body(config, "handle /* {")
+    assert "forward_auth" in _block_body(config, "handle_path /apps/my_app/* {")
+
+
 def test_generate_writes_file(tmp_path, monkeypatch):
     mgr = _manager(tmp_path, [], monkeypatch, env="dev")
     mgr.generate_config()

@@ -144,6 +144,20 @@ class CaddyConfigManager:
         lines.append(f"        reverse_proxy {local}")
         lines.append("    }")
 
+        # Machine-facing surfaces: proxied straight to Latarnia WITHOUT
+        # forward_auth. Caddy's forward_auth only validates the session cookie;
+        # these paths must accept a Bearer JWT too, so auth is enforced inside
+        # Latarnia instead — JWTAuthMiddleware for /api/*, the gateway for /mcp.
+        # (forward_auth here would 401 every machine token before it arrives.)
+        lines.append("    handle /api/* {")
+        lines.append(f"        reverse_proxy {local}")
+        lines.append("    }")
+        if self.config_manager.config.mcp.enabled:
+            mcp_path = self.config_manager.config.mcp.gateway_path.rstrip("/")
+            lines.append(f"    handle {mcp_path}/* {{")
+            lines.append(f"        reverse_proxy {local}")
+            lines.append("    }")
+
         # Per-app blocks. `handle_path` strips the matched prefix so the app
         # receives root-relative paths (e.g. /apps/my_app/page -> /page),
         # matching the behaviour of the deleted web_proxy.
@@ -166,7 +180,8 @@ class CaddyConfigManager:
             lines.append(f"        reverse_proxy {app_local}")
             lines.append("    }")
 
-        # Catch-all: dashboard, REST API, MCP gateway — all behind forward_auth.
+        # Catch-all: dashboard and any other browser route — behind
+        # forward_auth (session). /api and /mcp were carved out above.
         lines.append("    handle /* {")
         lines.append(f"        forward_auth {local} {{")
         lines.append("            uri /auth/verify")
