@@ -95,6 +95,28 @@ class CaddyConfigManager:
     # Generation
     # ------------------------------------------------------------------
 
+    def _forward_auth_lines(self, local: str) -> List[str]:
+        """Session-cookie `forward_auth` guard block (8-space indent).
+
+        On a 2xx from `/auth/verify` the request proceeds to the route's
+        `reverse_proxy` with the role headers copied in. On a **401**
+        (no/expired session) Caddy redirects the browser to `/auth/login`,
+        preserving the original path as `next` so login returns the user
+        there (spec.md:79-80; workflows.md flow-04). Only 401 is matched —
+        an app-level 403 (logged in, wrong role) must not redirect-loop to
+        login.
+        """
+        return [
+            f"        forward_auth {local} {{",
+            "            uri /auth/verify",
+            f"            copy_headers {_COPY_HEADERS}",
+            "            @auth_denied status 401",
+            "            handle_response @auth_denied {",
+            "                redir * /auth/login?next={http.request.uri.path} 302",
+            "            }",
+            "        }",
+        ]
+
     def _web_ui_apps(self) -> List[tuple]:
         """Return (app_name, port) for running service apps with a web UI.
 
@@ -173,20 +195,14 @@ class CaddyConfigManager:
             lines.append("    }")
             # Protected: app webUI
             lines.append(f"    handle_path /apps/{name}/* {{")
-            lines.append(f"        forward_auth {local} {{")
-            lines.append("            uri /auth/verify")
-            lines.append(f"            copy_headers {_COPY_HEADERS}")
-            lines.append("        }")
+            lines.extend(self._forward_auth_lines(local))
             lines.append(f"        reverse_proxy {app_local}")
             lines.append("    }")
 
         # Catch-all: dashboard and any other browser route — behind
         # forward_auth (session). /api and /mcp were carved out above.
         lines.append("    handle /* {")
-        lines.append(f"        forward_auth {local} {{")
-        lines.append("            uri /auth/verify")
-        lines.append(f"            copy_headers {_COPY_HEADERS}")
-        lines.append("        }")
+        lines.extend(self._forward_auth_lines(local))
         lines.append(f"        reverse_proxy {local}")
         lines.append("    }")
 
