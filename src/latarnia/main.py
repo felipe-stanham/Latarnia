@@ -1,14 +1,17 @@
 """
 Main FastAPI application for Latarnia
 """
+import asyncio
+import base64
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
 import shutil
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
 from latarnia.core.config import config_manager
@@ -87,6 +90,33 @@ async def lifespan(app: FastAPI):
         logger.info("Postgres is reachable")
     else:
         logger.warning("Postgres is not reachable — app auto-start will be skipped")
+
+    # Initialize the platform auth DB (create + migrate). Requires Postgres.
+    if pg_ok:
+        logger.info("Initializing platform auth DB (%s)...", auth_db.db_name)
+        if auth_db.initialize():
+            logger.info("Platform auth DB ready")
+        else:
+            logger.error("Auth DB init failed — auth endpoints will be unavailable")
+    else:
+        logger.warning("Skipping auth DB init — Postgres unreachable")
+
+    # Fail loud-but-soft if the TOTP encryption key is absent: TOTP setup and
+    # login can't work without it. Logged once at startup with a clear fix.
+    try:
+        _totp_key_loader()
+    except Exception:
+        logger.error(
+            "LATARNIA_TOTP_ENC_KEY is missing or invalid — TOTP setup/login "
+            "will fail. Add a 32-byte base64 key to secrets.env (mode 600)."
+        )
+    try:
+        _jwt_secret_loader()
+    except Exception:
+        logger.error(
+            "LATARNIA_JWT_SECRET is missing — machine-token issuance/validation "
+            "will fail. Add it to secrets.env (mode 600)."
+        )
 
     # Linger check: per-app user units only survive logout when linger is on.
     # Warn loudly but do not block startup — the main platform itself runs as
@@ -173,6 +203,20 @@ async def lifespan(app: FastAPI):
             ):
                 await mcp_gateway.on_app_started(app_entry.app_id)
 
+    # Generate the Caddyfile from current registry state and reload Caddy.
+    # Runs after auto-start so running apps already have assigned ports and
+    # get webUI route blocks. A reload failure (e.g. Caddy not installed in
+    # local dev) is logged but does not block platform startup.
+    logger.info("Generating Caddy configuration...")
+    try:
+        caddy_manager.generate_config()
+        if caddy_manager.reload():
+            logger.info("Caddy configuration loaded")
+        else:
+            logger.warning("Caddy reload did not succeed (see logs above)")
+    except Exception as exc:
+        logger.error("Caddy config generation failed: %s", exc)
+
     # Start Redis stream consumer
     logger.info("Starting Redis stream consumer...")
     await event_subscriber.start()
@@ -198,8 +242,6 @@ async def lifespan(app: FastAPI):
     subprocess_launcher.stop_all()
     logger.info("Stopping all Streamlit apps...")
     streamlit_manager.stop_all()
-    logger.info("Closing web proxy HTTP client...")
-    await web_proxy_module.shutdown()
     logger.info("Shutdown complete")
 
 
@@ -263,10 +305,90 @@ if config_manager.config.mcp.enabled:
     mcp_gateway = MCPGateway(config_manager, app_manager)
     app_manager.mcp_gateway = mcp_gateway
 
-# Initialize web UI proxy
-from .web.web_proxy import router as web_proxy_router
-from .web import web_proxy as web_proxy_module
-web_proxy_module.app_manager = app_manager
+# Initialize Caddy config manager (P-0008). Caddy is now the single ingress
+# and reverse proxy; the old Python web_proxy has been removed. The manager
+# regenerates the per-env Caddyfile from registry state on app lifecycle
+# events and asks Caddy to reload.
+from .caddy import CaddyConfigManager
+
+caddy_manager = CaddyConfigManager(config_manager, app_manager)
+app_manager.caddy_manager = caddy_manager
+
+# Initialize auth foundation (P-0008 Scope 2). Platform auth state lives in
+# `latarnia_platform_{env}`; the DB is created + migrated at startup.
+from .auth import AuthDB
+from .auth.users import UserStore
+from .auth.sessions import SessionStore
+from .auth.roles import RoleStore
+from .auth.providers import TOTPAuthProvider
+from .auth.jwt_auth import JWTAuth
+from .auth.tokens import MachineTokenStore
+from .auth.middleware import JWTAuthMiddleware
+from .auth.routes import build_auth_router, resolve_session_user
+
+
+def _load_platform_secret(name: str) -> Optional[str]:
+    """Read a platform-wide secret from the env, then the master secrets file.
+
+    These (LATARNIA_TOTP_ENC_KEY, LATARNIA_JWT_SECRET) are platform-level, not
+    per-app, so they are read directly from the master file rather than via the
+    per-app filtered view. Never logged.
+    """
+    val = os.environ.get(name)
+    if not val:
+        val = secret_manager.load().get(name)
+    return val
+
+
+def _totp_key_loader() -> bytes:
+    raw = _load_platform_secret("LATARNIA_TOTP_ENC_KEY")
+    if not raw:
+        raise ValueError(
+            "LATARNIA_TOTP_ENC_KEY is not set (add it to secrets.env, mode 600)"
+        )
+    return base64.b64decode(raw)
+
+
+def _jwt_secret_loader() -> str:
+    raw = _load_platform_secret("LATARNIA_JWT_SECRET")
+    if not raw:
+        raise ValueError(
+            "LATARNIA_JWT_SECRET is not set (add it to secrets.env, mode 600)"
+        )
+    return raw
+
+
+auth_db = AuthDB(config_manager, pg_client)
+user_store = UserStore(auth_db)
+session_store = SessionStore(auth_db, config_manager)
+role_store = RoleStore(auth_db, user_store)
+totp_provider = TOTPAuthProvider(
+    auth_db, _totp_key_loader, issuer=config_manager.config.auth.totp_issuer
+)
+jwt_auth = JWTAuth(_jwt_secret_loader)
+token_store = MachineTokenStore(auth_db, jwt_auth)
+# Enforce JWT on the MCP gateway (cap-021): Bearer required, tool list scoped,
+# X-Latarnia-App-Role forwarded to per-app MCP servers.
+if mcp_gateway is not None:
+    mcp_gateway.jwt_auth = jwt_auth
+    mcp_gateway.token_store = token_store
+auth_router = build_auth_router(
+    auth_db, user_store, session_store, totp_provider, config_manager,
+    role_store=role_store, app_manager=app_manager,
+    jwt_auth=jwt_auth, token_store=token_store,
+)
+
+
+def _session_user(request):
+    """Resolve the browser session's user (cookie-only), or None.
+
+    Delegates to the auth module's single resolver so dashboard data scoping
+    (e.g. /api/apps) and the auth router never diverge. Behind Caddy the
+    session cookie is forwarded, so this works there too.
+    """
+    return resolve_session_user(
+        request, session_store, user_store, config_manager.config.auth.cookie_name
+    )
 
 
 # Create FastAPI app
@@ -277,11 +399,24 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# Auth gate for /api/* (P-0008 Scope 4): require a valid Bearer JWT or session
+# cookie. Pure-ASGI so /auth/*, /mcp (SSE) and websockets pass through
+# untouched. MCP auth is enforced inside the gateway.
+app.add_middleware(
+    JWTAuthMiddleware,
+    jwt_auth=jwt_auth,
+    token_store=token_store,
+    session_store=session_store,
+    cookie_name=config_manager.config.auth.cookie_name,
+)
+
+# Include auth routes (/auth/* and /api/auth/*) — /auth/* must be reachable
+# without a session (Caddy routes /auth/* publicly; verify is the forward_auth
+# target). /api/auth/* is gated by the middleware above.
+app.include_router(auth_router)
+
 # Include web dashboard routes
 app.include_router(dashboard_router)
-
-# Include web UI proxy routes (catch-all, must be after specific routes)
-app.include_router(web_proxy_router)
 
 
 async def _cleanup_orphaned_apps() -> int:
@@ -457,6 +592,9 @@ async def discover_apps():
     try:
         count = app_manager.discover_apps()
         orphan_count = await _cleanup_orphaned_apps()
+        # Regenerate unconditionally: a manual discovery may have picked up an
+        # externally-started app whose port wasn't reflected in the Caddyfile.
+        await asyncio.to_thread(caddy_manager.on_app_registered)
         return {
             "discovered_count": count,
             "orphans_cleaned": orphan_count,
@@ -467,12 +605,36 @@ async def discover_apps():
 
 
 @app.get("/api/apps")
-async def get_all_apps():
-    """Get all registered applications with combined systemd+/health status."""
+async def get_all_apps(request: Request):
+    """Get registered apps with combined systemd+/health status.
+
+    Role-scoped (P-0008 cap-015): when a browser session is present, a
+    non-superuser only sees apps where their role for that app is not `none`,
+    so dashboard tiles are filtered server-side before the client renders them.
+    Superusers (and, in dev, unauthenticated direct access) see all apps.
+    Machine-token (JWT) scoping is layered on in Scope 4.
+
+    Security invariant: the `user=None` (unauthenticated) branch returns all
+    apps. This is safe only because in prod ufw blocks port 8000 and Caddy's
+    forward_auth guarantees an authenticated session reaches this endpoint;
+    direct unauthenticated access is a dev-only convenience.
+    """
     try:
+        claims = getattr(request.state, "jwt_claims", None)
+        user = _session_user(request)
+        # The middleware already gated this route; if neither identity resolves
+        # now (e.g. session revoked in the TOCTOU window), fail closed.
+        if claims is None and user is None:
+            raise HTTPException(status_code=401, detail="Authentication required")
         apps = app_manager.registry.get_all_apps()
         payload = []
         for app_entry in apps:
+            if claims is not None and not claims.get("super"):
+                # Machine token: scoped to the apps named in its JWT claim.
+                if claims.get("apps", {}).get(app_entry.name, "none") == "none":
+                    continue
+            elif not role_store.is_visible(user, app_entry.name):
+                continue
             entry = app_entry.to_dict()
             combined = health_monitor.get_overall_status(app_entry.app_id)
             entry["overall_status"] = combined["overall_status"]
@@ -487,13 +649,30 @@ async def get_all_apps():
 
 
 @app.get("/api/apps/{app_id}")
-async def get_app(app_id: str):
-    """Get a specific application by ID"""
+async def get_app(app_id: str, request: Request):
+    """Get a specific application by ID (role/scope enforced).
+
+    A machine token scoped to other apps (cap-020) gets 403; a non-superuser
+    session with role `none` for the app likewise gets 403.
+    """
     try:
         app = app_manager.registry.get_app(app_id)
         if not app:
             raise HTTPException(status_code=404, detail=f"App {app_id} not found")
-        
+
+        claims = getattr(request.state, "jwt_claims", None)
+        if claims is not None and not claims.get("super"):
+            if claims.get("apps", {}).get(app.name, "none") == "none":
+                raise HTTPException(status_code=403, detail="Token not scoped to this app")
+        else:
+            user = _session_user(request)
+            if user is None:
+                # Session vanished after the middleware gate — fail closed.
+                raise HTTPException(status_code=401, detail="Authentication required")
+            if not user["is_superuser"] and \
+                    role_store.get_role(user["id"], app.name) == "none":
+                raise HTTPException(status_code=403, detail="No access to this app")
+
         return app.to_dict()
     except HTTPException:
         raise
@@ -622,6 +801,10 @@ async def delete_app(app_id: str, delete_folder: bool = False):
             except OSError as exc:
                 logger.warning("Could not delete app folder %s: %s", app_path, exc)
 
+        # App is gone from the registry — regenerate Caddy routes (drops its
+        # webUI/swagger blocks so they 404).
+        await asyncio.to_thread(caddy_manager.on_app_deregistered, app_id)
+
         return {
             "success": True,
             "message": f"App {app_id} deleted successfully",
@@ -714,6 +897,7 @@ async def start_service(app_id: str):
                     detail=f"MCP backward compatibility violation for app {app_id}. "
                     "Previously registered tools were removed. App stopped.",
                 )
+            await asyncio.to_thread(caddy_manager.on_app_registered, app_id)
             return {"success": True, "message": f"Service started for app {app_id}"}
         else:
             raise HTTPException(status_code=400, detail=f"Failed to start service for app {app_id}")
@@ -732,6 +916,7 @@ async def stop_service(app_id: str):
         if success:
             if mcp_gateway:
                 await mcp_gateway.on_app_stopped(app_id)
+            await asyncio.to_thread(caddy_manager.on_app_deregistered, app_id)
             return {"success": True, "message": f"Service stopped for app {app_id}"}
         else:
             raise HTTPException(status_code=400, detail=f"Failed to stop service for app {app_id}")
@@ -756,6 +941,7 @@ async def restart_service(app_id: str):
                     detail=f"MCP backward compatibility violation for app {app_id}. "
                     "Previously registered tools were removed. App stopped.",
                 )
+            await asyncio.to_thread(caddy_manager.on_app_registered, app_id)
             return {"success": True, "message": f"Service restarted for app {app_id}"}
         else:
             raise HTTPException(status_code=400, detail=f"Failed to restart service for app {app_id}")
@@ -1273,6 +1459,7 @@ async def start_app_process(app_id: str):
                 "Previously registered tools were removed. App stopped.",
             )
 
+        await asyncio.to_thread(caddy_manager.on_app_registered, app_id)
         return {"success": True, "message": f"App {app_id} started successfully"}
 
     except HTTPException:
@@ -1302,6 +1489,7 @@ async def stop_app_process(app_id: str):
         if mcp_gateway:
             await mcp_gateway.on_app_stopped(app_id)
 
+        await asyncio.to_thread(caddy_manager.on_app_deregistered, app_id)
         return {"success": True, "message": f"App {app_id} stopped successfully"}
 
     except HTTPException:
@@ -1340,6 +1528,7 @@ async def restart_app_process(app_id: str):
                 "Previously registered tools were removed. App stopped.",
             )
 
+        await asyncio.to_thread(caddy_manager.on_app_registered, app_id)
         return {"success": True, "message": f"App {app_id} restarted successfully"}
 
     except HTTPException:

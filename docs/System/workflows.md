@@ -383,76 +383,173 @@ sequenceDiagram
     Dash->>Dash: Format timestamps,<br/>extract messages
 ```
 
-## 10. Web UI Reverse Proxy Request Flow
+## 10. Role-Based App Tile Filtering and forward_auth Role Injection
 
-How the platform proxies HTTP and WebSocket requests to app-owned web UIs. References cap-008 in P-0002.
+How the dashboard filters app tiles server-side by role and how `/auth/verify` injects per-app role headers into every forwarded request. References cap-015, cap-016, flow-03 in P-0008.
 
 ```mermaid
 sequenceDiagram
     participant Browser as User Browser
-    participant Proxy as Web Proxy<br/>/apps/{name}/{path}
-    participant Reg as App Registry
-    participant App as App Web Server<br/>:810x
+    participant Caddy
+    participant AV as /auth/verify
+    participant RS as RoleStore
+    participant DB as latarnia_platform_{env}
+    participant Dash as Dashboard /api/apps
 
-    Browser->>Proxy: GET /apps/crm/ (HTTP)
-    Proxy->>Reg: Lookup app crm
-    Reg-->>Proxy: port=8101, has_web_ui=true, running
+    Note over Browser,Dash: Dashboard load — server-side tile filtering
 
-    Proxy->>App: GET / + X-Forwarded-For/Proto/Host headers
-    App-->>Proxy: 200 OK (HTML)
-    Proxy-->>Browser: 200 OK (HTML, stripped response headers)
+    Browser->>Caddy: GET / [Cookie: latarnia_session=abc]
+    Caddy->>AV: GET /auth/verify [X-Forwarded-Uri: /]
+    AV->>DB: Validate session hash
+    AV->>RS: get_role(user_id, app_name) for X-Forwarded-Uri app
+    AV-->>Caddy: 200 [X-Latarnia-User: uid, X-Latarnia-App-Role: webUI-med, X-Latarnia-Is-Super: false]
+    Caddy->>Dash: GET /api/apps [X-Latarnia-User: uid, X-Latarnia-Is-Super: false]
+    Dash->>RS: get_role(uid, app) for each app in registry
+    Note over Dash: Filter: hide tiles where role = none<br/>Superuser bypasses filter (all apps visible, role = full)
+    Dash-->>Browser: App list (only apps with role != none)
 
-    Note over Browser,App: Static assets
+    Note over Browser,DB: Protected app request — role injected into proxy headers
 
-    Browser->>Proxy: GET /apps/crm/static/style.css
-    Proxy->>App: GET /static/style.css
-    App-->>Proxy: 200 OK (CSS)
-    Proxy-->>Browser: 200 OK (CSS)
+    Browser->>Caddy: GET /apps/crm/dashboard [Cookie: ...]
+    Caddy->>AV: GET /auth/verify [X-Forwarded-Uri: /apps/crm/dashboard, Cookie: ...]
+    AV->>DB: Validate session
+    AV->>RS: get_role(uid, "crm")
+    AV-->>Caddy: 200 [X-Latarnia-User: uid, X-Latarnia-App-Role: webUI-med, X-Latarnia-Is-Super: false]
+    Caddy->>Caddy: Copy X-Latarnia-* headers to upstream
+    Note right of Caddy: App receives role header;<br/>may adjust content accordingly
+```
 
-    Note over Browser,App: WebSocket upgrade (via aiohttp)
+Role assignment is managed via `GET /api/auth/roles`, `GET /api/auth/roles/all` (superuser only), and `POST /api/auth/roles/{app}` (superuser only). The `RoleStore` (`src/latarnia/auth/roles.py`) reads and writes the `app_roles` table; default effective role for any unassigned (user, app) pair is `none`.
 
-    Browser->>Proxy: GET /apps/crm/ws (Upgrade: websocket)
-    Proxy->>App: WS connect ws://localhost:8101/ws
-    App-->>Proxy: 101 Switching Protocols
-    Proxy-->>Browser: 101 Switching Protocols
-    Browser->>Proxy: WS frames (bidirectional relay)
-    Proxy->>App: WS frames (bidirectional relay)
+## 11. JWT Machine Token Issuance and API Call
 
-    Note over Browser,App: Error scenarios
+How machine clients (scripts, AI agents) obtain and use long-lived JWT tokens to call the Latarnia REST API. References cap-019, cap-020, flow-04 in P-0008.
 
-    Browser->>Proxy: GET /apps/offline_app/
-    Proxy->>Reg: Lookup offline_app
-    Reg-->>Proxy: status=stopped
-    Proxy-->>Browser: 503 App Unavailable (HTML error page)
+```mermaid
+sequenceDiagram
+    actor Operator
+    participant Dashboard as Dashboard (API Tokens modal)
+    participant Auth as /api/auth/tokens
+    participant MTS as MachineTokenStore
+    participant DB as latarnia_platform_{env}
+    actor Client as Machine Client
 
-    Browser->>Proxy: GET /apps/unknown/
-    Proxy->>Reg: Lookup unknown
-    Reg-->>Proxy: not found
-    Proxy-->>Browser: 404 App Not Found (HTML error page)
+    Note over Operator,DB: Token creation (one-time, requires superuser session)
+
+    Operator->>Dashboard: POST /api/auth/tokens {label, app_scope, expires_at}
+    Dashboard->>Auth: (superuser session cookie required)
+    Auth->>MTS: create(label, app_scope, expires_at, granted_by)
+    MTS->>MTS: Sign HS256 JWT {sub, iat, exp, apps, super}
+    MTS->>DB: INSERT machine_tokens (token_hash=SHA256(jwt), app_scope, ...)
+    MTS-->>Auth: raw JWT string
+    Auth-->>Dashboard: {token: "<raw_jwt>"}
+    Dashboard-->>Operator: Show token once (plaintext never stored)
+
+    Note over Client,DB: API call with Bearer token
+
+    Client->>Client: GET /api/apps\nAuthorization: Bearer <jwt>
+    Note over Client: JWTAuthMiddleware intercepts all /api/* requests
+
+    Client->>Client: JWTAuthMiddleware.validate_jwt(token)
+    Client->>DB: SELECT machine_tokens WHERE token_hash=SHA256(jwt) AND revoked_at IS NULL
+    alt JWT invalid, expired, or revoked
+        Client-->>Client: 401 Unauthorized
+    else Valid
+        Client->>Client: Extract app_scope from JWT claims
+        Client-->>Client: 200 OK (response filtered to apps in scope)
+    end
+
+    Note over Operator,DB: Token management
+    Operator->>Auth: GET /api/auth/tokens  →  list active tokens (no plaintext values)
+    Operator->>Auth: DELETE /api/auth/tokens/{id}  →  set revoked_at = now()
+```
+
+`LATARNIA_JWT_SECRET` (from `secrets.env`) is the HS256 signing key. Token creation requires a superuser session if any app in `app_scope` carries the `full` role.
+
+## 12. MCP Gateway Bearer Auth Flow
+
+How an AI agent authenticates to the MCP Gateway with a Bearer JWT and receives a scoped tool list. References cap-021, flow-06 in P-0008.
+
+```mermaid
+sequenceDiagram
+    actor Agent as AI Agent (e.g. Claude Desktop)
+    participant Caddy
+    participant GW as MCP Gateway /mcp/sse
+    participant DB as latarnia_platform_{env}
+    participant AppMCP as App MCP Server
+
+    Agent->>Caddy: GET /mcp/sse\nAuthorization: Bearer <jwt>
+    Note over Caddy: /mcp/* has NO forward_auth<br/>(gateway validates the JWT internally)
+    Caddy->>GW: Proxy request (Bearer header forwarded)
+
+    GW->>GW: Validate JWT signature + expiry
+    GW->>DB: SELECT machine_tokens WHERE token_hash=SHA256(jwt) AND revoked_at IS NULL
+    alt Invalid or revoked
+        GW-->>Agent: 401 Unauthorized
+    else Valid
+        GW->>GW: Extract app_scope from JWT claims (ContextVar per connection)
+        Note over GW: Tool list filtered to apps the token has access to
+        GW->>AppMCP: Connect to app MCP server\nX-Latarnia-App-Role: <role_from_scope>
+        GW-->>Agent: SSE stream open; aggregated tool list (scoped)
+
+        Agent->>GW: call_tool(app.tool_name, args)
+        GW->>GW: Check token has access to app
+        GW->>AppMCP: Forward call with X-Latarnia-App-Role header
+        AppMCP-->>GW: Tool result
+        GW-->>Agent: Tool result
+    end
+```
+
+The MCP Gateway uses a per-connection `ContextVar` to carry the token's app scope — this isolates concurrent connections. Websocket and `/mcp` traffic passes through `JWTAuthMiddleware` without session-cookie gating; JWT is the sole credential path for machine clients on `/mcp`.
+
+## 13. Caddy Ingress — App Request Flow
+
+How external browser requests reach Service App web UIs via Caddy (P-0008 Scope 1). The platform's Python web proxy was removed; Caddy is now the sole reverse proxy for app traffic. References P-0008 architecture.
+
+```mermaid
+sequenceDiagram
+    participant Browser as User Browser
+    participant C as Caddy
+    participant AV as /auth/verify<br/>(Latarnia :8000)
+    participant App as Service App<br/>:810x
+
+    Note over Browser,App: Protected app page
+
+    Browser->>C: GET /apps/crm/dashboard [Cookie: latarnia_session=abc]
+    C->>AV: GET /auth/verify [X-Forwarded-Uri: /apps/crm/dashboard, Cookie: ...]
+    AV-->>C: 200 [X-Latarnia-User: uid, X-Latarnia-App-Role: webUI-med, X-Latarnia-Is-Super: false]
+    C->>App: GET /dashboard [X-Latarnia-User, X-Latarnia-App-Role headers]
+    App-->>Browser: 200 OK HTML
+
+    Note over Browser,App: Public Swagger (no auth check)
+
+    Browser->>C: GET /apps/crm/docs
+    C->>App: GET /docs
+    App-->>Browser: 200 OK Swagger UI
+
+    Note over Browser,App: Unauthenticated request
+
+    Browser->>C: GET /apps/crm/dashboard [no valid session]
+    C->>AV: GET /auth/verify
+    AV-->>C: 401 Unauthorized
+    C-->>Browser: 401 (redirects to /auth/login)
 ```
 
 ```mermaid
 flowchart TD
-    Request([Incoming request<br/>/apps/app_name/path]) --> Redirect{Bare /apps/app_name<br/>no trailing slash?}
-    Redirect -- Yes --> HTTP307[307 Redirect to /apps/app_name/]
+    Request([Incoming HTTPS request]) --> RouteMatch{Route match?}
 
-    Redirect -- No --> LookupApp[Lookup app in registry]
-    LookupApp --> Exists{App found?}
-    Exists -- No --> E404[404 Not Found page]
+    RouteMatch -- "/auth/* or /docs*" --> PublicLatarnia[Proxy to Latarnia :8000<br/>no auth check]
+    RouteMatch -- "/apps/name/docs* or /openapi.json" --> PublicSwagger[Proxy to App port<br/>no auth check]
+    RouteMatch -- "/apps/name/*" --> ForwardAuth[forward_auth to /auth/verify]
+    RouteMatch -- "/* catch-all" --> ForwardAuthCatchAll[forward_auth to /auth/verify]
 
-    Exists -- Yes --> HasWebUI{has_web_ui = true?}
-    HasWebUI -- No --> E404NoUI[404 No Web UI page]
+    ForwardAuth --> AuthOk{/auth/verify response?}
+    AuthOk -- 401 --> Deny[Return 401 to browser]
+    AuthOk -- 200 + headers --> StripPrefix[handle_path strips /apps/name prefix]
+    StripPrefix --> ProxyApp[Proxy to App port with<br/>X-Latarnia-* headers]
 
-    HasWebUI -- Yes --> IsRunning{status = running?}
-    IsRunning -- No --> E503[503 App Unavailable page]
-
-    IsRunning -- Yes --> IsWS{WebSocket upgrade?}
-    IsWS -- Yes --> WSProxy[aiohttp bidirectional relay<br/>to ws://localhost:PORT/path]
-    IsWS -- No --> HTTPProxy[httpx.AsyncClient request<br/>to http://localhost:PORT/path]
-
-    HTTPProxy --> ConnectOk{Connect OK?}
-    ConnectOk -- ConnectError --> E503Connect[503 Cannot connect page]
-    ConnectOk -- Timeout --> E504[504 Gateway Timeout page]
-    ConnectOk -- Other error --> E502[502 Bad Gateway page]
-    ConnectOk -- Success --> ForwardResp[Forward status + headers + body]
+    ForwardAuthCatchAll --> AuthOkCatchAll{/auth/verify response?}
+    AuthOkCatchAll -- 401 --> DenyCatchAll[Return 401 to browser]
+    AuthOkCatchAll -- 200 + headers --> ProxyLatarnia[Proxy to Latarnia :8000 with<br/>X-Latarnia-* headers]
 ```

@@ -14,3 +14,8 @@ httpx>=0.25.2,<1.0.0
 aiohttp>=3.9.1,<4.0.0
 psycopg[binary]>=3.1.0,<4.0.0
 mcp>=1.0.0,<2.0.0
+# P-0008 auth: TOTP, JWT, AES-GCM encryption, QR code generation
+pyotp>=2.9.0,<3.0.0
+PyJWT>=2.8.0,<3.0.0
+cryptography>=42.0.0
+qrcode>=7.4,<8.0

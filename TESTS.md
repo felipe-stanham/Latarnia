@@ -237,3 +237,36 @@ These tests require the Playwright MCP server and a running local dev instance o
 ### Database
 
 - **test_example_app_db_provisioned:** Query the API `GET http://localhost:8000/api/apps`. -> The `example_full_app` entry has `database_info.provisioned == true` and `database_info.applied_migrations` contains `["001_initial.sql", "002_add_tags.sql", "003_add_status.sql"]`.
+
+## Authentication, Roles & Tokens (P-0008)
+
+> After P-0008, `/api/*` and the MCP gateway require authentication. Browser
+> flows use a session cookie; machine/MCP clients use a Bearer JWT. The
+> platform auth DB is `latarnia_platform_{env}`. Caddy/ufw runtime criteria
+> (cap-001/003/006) are validated on the Pi/tst, not locally.
+
+### Platform DB & Setup
+
+- **test_platform_auth_db_created:** Start Latarnia (dev). Connect to Postgres `latarnia_platform_dev`. -> DB exists; tables `users`, `user_credentials`, `sessions`, `app_roles`, `machine_tokens`, `schema_versions` are present.
+- **test_first_run_totp_setup:** With no active users, `GET /auth/setup`. -> Renders a QR-code page (account `admin`). Submitting a valid TOTP code -> 303 redirect to `/dashboard` with a `latarnia_session` cookie; the user becomes an active superuser.
+
+### Login & Session
+
+- **test_totp_login:** `POST /auth/login` with username `admin` + a valid 6-digit code. -> 302/303 with `latarnia_session` cookie. Replaying the same code within its 30s window -> rejected.
+- **test_verify_headers:** `GET /auth/verify` with a valid session cookie and `X-Forwarded-Uri: /apps/example_full_app/`. -> 200 with `X-Latarnia-User`, `X-Latarnia-App-Role`, `X-Latarnia-Is-Super`. Without a cookie -> 401.
+
+### Roles
+
+- **test_dashboard_tile_role_filtering:** As a non-superuser with role `none` for `example_full_app`, load `/dashboard` (GET `/api/apps`). -> The `example_full_app` tile is absent. Grant `webUI-low` -> tile appears on next load with a role badge.
+- **test_assign_full_requires_superuser:** `POST /api/auth/roles/example_full_app` `{"role":"full","user_id":...}` as a non-superuser -> 403; as a superuser -> 200.
+
+### Machine Tokens
+
+- **test_token_issue_and_use:** `POST /api/auth/tokens` `{"label":"agent","app_scope":{"example_full_app":"webUI-med"}}` (session-authed) -> returns a raw JWT once. `GET /api/apps` with `Authorization: Bearer <jwt>` -> 200. No token -> 401.
+- **test_token_revocation:** `DELETE /api/auth/tokens/{id}` -> token marked revoked; a subsequent `GET /api/apps` with that token -> 401.
+- **test_token_scope_enforced:** A non-superuser token scoped to app A -> `GET /api/apps/{B}` returns 403.
+
+### Role-Aware Example App
+
+- **test_example_webui_role_header:** `GET http://localhost:8100/` with header `X-Latarnia-App-Role: webUI-low` -> no "Add Item" form. With `full` -> "Add Item" form present and an "Admin" section. No header -> defaults to full (backward compatible).
+- **test_mcp_requires_bearer:** Connect an MCP client to `/mcp/sse` without a Bearer token -> 401. With a valid in-scope token -> tool list scoped to the token's apps; the per-app MCP server receives `X-Latarnia-App-Role`.

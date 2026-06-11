@@ -95,6 +95,21 @@ class PgClient:
             )
         self.logger.info(f"Created database: {db_name} (owner: {owner})")
 
+    def create_plain_database(self, db_name: str) -> None:
+        """CREATE DATABASE owned by the connecting superuser (no separate role).
+
+        Used for the platform-owned auth DB (`latarnia_platform_{env}`), which
+        the platform accesses directly as superuser — unlike per-app DBs that
+        get their own least-privilege role.
+        """
+        with self._connect() as conn:
+            conn.execute(
+                psycopg.sql.SQL("CREATE DATABASE {}").format(
+                    psycopg.sql.Identifier(db_name)
+                )
+            )
+        self.logger.info(f"Created database: {db_name} (superuser-owned)")
+
     def revoke_public_connect(self, db_name: str) -> None:
         """REVOKE CONNECT ON DATABASE FROM PUBLIC."""
         with self._connect() as conn:

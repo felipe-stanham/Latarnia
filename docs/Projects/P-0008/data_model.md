@@ -10,10 +10,21 @@ erDiagram
     users {
         uuid id PK
         string username
-        string totp_secret_enc "AES-256-GCM encrypted"
         boolean is_superuser
+        boolean is_active
+        string setup_token "nullable; one-time token for TOTP enrollment"
+        timestamp setup_token_expires_at "nullable"
         timestamp created_at
         timestamp last_login_at
+    }
+
+    user_credentials {
+        uuid id PK
+        uuid user_id FK
+        string auth_method "totp | (future: password, passkey, ...)"
+        jsonb credential_data "method-specific encrypted data"
+        timestamp created_at
+        timestamp updated_at
     }
 
     sessions {
@@ -46,6 +57,7 @@ erDiagram
         timestamp revoked_at "null = active"
     }
 
+    users ||--o{ user_credentials : "has"
     users ||--o{ sessions : "has"
     users ||--o{ app_roles : "assigned to"
     users ||--o{ machine_tokens : "owns"
@@ -56,9 +68,16 @@ erDiagram
 ## Field Notes
 
 ### `users`
-- V1 supports a single user. Schema is designed for multiple users but `POST /api/auth/users` is superuser-only and out of scope for V1 UI (future).
-- `totp_secret_enc`: the raw TOTP secret (base32, 20 bytes) encrypted with AES-256-GCM. Key comes from `LATARNIA_TOTP_ENC_KEY` in `secrets.env`. Nonce prepended to ciphertext.
+- Multi-user from V1. The first user created via `/auth/setup` is the superuser. Subsequent users are added by the superuser via `POST /api/auth/users`.
+- `is_active`: false means the user cannot log in; all existing sessions are invalidated on deactivation. Superuser cannot deactivate themselves.
+- `setup_token`: a random token generated when the superuser creates a new user. The invitee visits `/auth/setup?token=<setup_token>` to complete TOTP enrollment. Single-use; nulled out after setup completes. Expires after 24h.
 - `is_superuser`: true for the initial setup user; can be granted to additional users by an existing superuser.
+
+### `user_credentials`
+- One row per (user, auth_method). V1 always has `auth_method = 'totp'`.
+- `credential_data`: jsonb containing method-specific data. For TOTP: `{"totp_secret_enc": "<base64-nonce+ciphertext>"}`. The TOTP secret (base32, 20 bytes) is encrypted with AES-256-GCM using `LATARNIA_TOTP_ENC_KEY` from `secrets.env`. Nonce prepended to ciphertext.
+- Adding a new auth method in the future means inserting a new row with a different `auth_method` — no schema change required.
+- The `AuthProvider` protocol in `auth/providers/base.py` defines the interface; each provider is responsible for reading and writing its own `credential_data` shape.
 
 ### `sessions`
 - Cookie value is a random UUID (v4). The UUID is never stored — only its SHA-256 hash is in the DB.
@@ -104,3 +123,12 @@ src/latarnia/auth/migrations/
 ```
 
 Applied via a simple sequential runner (no external migration tool). A `schema_versions` table in `latarnia_platform_{env}` tracks applied migrations by filename + checksum, matching the pattern used by `db_provisioner.py` for app DBs.
+
+```
+src/latarnia/auth/migrations/
+├── 001_create_users.sql          — users table (no totp_secret_enc)
+├── 002_create_user_credentials.sql — user_credentials table
+├── 003_create_sessions.sql
+├── 004_create_app_roles.sql
+└── 005_create_machine_tokens.sql
+```

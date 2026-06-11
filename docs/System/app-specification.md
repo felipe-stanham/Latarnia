@@ -244,6 +244,42 @@ All endpoints must return standard HTTP status codes with JSON error responses:
 - `404`: Resource Not Found
 - `500`: Internal Server Error
 
+## Authentication Headers (P-0008)
+
+After P-0008, Caddy is the single ingress and authenticates every request
+before proxying it to your app. On authenticated requests the platform injects
+the following headers so your app knows *who* is calling and at *what access
+level* — your app never implements authentication itself.
+
+All three are set together by `/auth/verify` on an authenticated request; an
+unauthenticated request is intercepted by Caddy and never reaches your app.
+
+| Header | Always present? | Values | Meaning |
+|--------|-----------------|--------|---------|
+| `X-Latarnia-User` | yes (on authenticated requests) | user id (UUID) | The signed-in user. |
+| `X-Latarnia-App-Role` | yes (on authenticated requests) | `none` \| `webUI-low` \| `webUI-med` \| `webUI-full` \| `full` | The caller's role **for your app**. |
+| `X-Latarnia-Is-Super` | yes (on authenticated requests) | `true` \| `false` | Whether the user is the platform superuser (treated as `full`). |
+
+**Role semantics** (your app decides what each level means):
+
+- `none` — no access; the platform won't normally route the user here (the dashboard tile is hidden). Treat as deny.
+- `webUI-low` / `webUI-med` / `webUI-full` — increasing webUI capability. A common pattern: `low` = read-only, `med`+ = create/update, `full` = administrative actions.
+- `full` — full webUI access **plus** REST API access. Superusers always receive `full`.
+
+**Trust model**
+
+- These headers are set by Latarnia/Caddy and are only trustworthy because app
+  ports are not externally reachable (the firewall blocks them — see the ufw
+  rules). Trust `X-Latarnia-*` **only** when your app is reached through the
+  platform, never when its port is directly exposed.
+- Apps must not implement their own login. They receive the user's role and may
+  use it to adjust responses (hide actions, gate writes, etc.).
+
+**Backward compatibility**
+
+- Apps that do not implement role-based logic may ignore these headers entirely
+  and keep working unchanged. The headers are additive.
+
 ## Redis Integration
 
 ### Overview
@@ -1018,6 +1054,48 @@ if __name__ == "__main__":
 - The platform does **not** validate MCP tool schemas or responses.
 - The platform does **not** support stdio-based MCP transport.
 - The platform does **not** proxy MCP requests to the app directly. The **MCP Gateway** (`src/latarnia/managers/mcp_gateway.py`, shipped in P-0002) aggregates tools from all healthy MCP-enabled apps into a single SSE endpoint at `/mcp/sse`. External AI clients connect to the gateway, not to individual apps. Apps don't need to know about the gateway — they just expose their MCP server on the assigned `--mcp-port` and the gateway discovers it.
+
+### Role-Aware MCP Tools (P-0008)
+
+When an MCP request reaches your app's MCP server **through the gateway**, the
+gateway forwards the caller's role on the SSE connection as the
+`X-Latarnia-App-Role` header (same values as the webUI header above). The role
+level matches the user's webUI role for your app.
+
+- MCP servers **may** use this header to restrict which tools they expose
+  (`tools/list`) or which they allow to execute (`tools/call`) — e.g. only
+  offer destructive/write tools to `webUI-full` and `full`.
+- This is optional: an app that ignores the header exposes all its tools to any
+  caller the gateway lets through (the gateway already requires a valid,
+  in-scope machine token before connecting).
+
+Read the header per connection and gate accordingly. With the `mcp` SSE
+transport the header arrives in the ASGI connection `scope`:
+
+```python
+from contextvars import ContextVar
+
+_role = ContextVar("mcp_role", default="full")  # default full = backward compatible
+DESTRUCTIVE_ROLES = {"webUI-full", "full"}
+
+async def handle_sse(scope, receive, send):
+    headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
+    token = _role.set(headers.get("x-latarnia-app-role", "full"))
+    try:
+        async with sse_transport.connect_sse(scope, receive, send) as streams:
+            await mcp_server.run(streams[0], streams[1],
+                                 mcp_server.create_initialization_options())
+    finally:
+        _role.reset(token)
+
+@mcp_server.call_tool()
+async def call_tool(name, arguments):
+    if name == "add_item" and _role.get() not in DESTRUCTIVE_ROLES:
+        return [{"type": "text", "text": f"Error: role '{_role.get()}' may not add items"}]
+    ...
+```
+
+(See `examples/example_full_app/app.py` for a complete role-aware example.)
 
 ### Testing Your MCP Server
 

@@ -157,6 +157,18 @@ home.stanham.com:443 {
         reverse_proxy localhost:8000
     }
 
+    # Machine-facing: NO forward_auth — Latarnia authenticates internally
+    # (JWTAuthMiddleware accepts a Bearer JWT or a session cookie). Putting
+    # forward_auth here would 401 every Bearer token (forward_auth only checks
+    # the session cookie). See T-0002.
+    handle /api/* {
+        reverse_proxy localhost:8000
+    }
+    # MCP gateway validates the Bearer JWT itself (no forward_auth).
+    handle /mcp/* {
+        reverse_proxy localhost:8000
+    }
+
     # Public: per-app swagger (generated per registered app)
     handle /apps/my_app/docs* {
         reverse_proxy localhost:8151
@@ -174,7 +186,7 @@ home.stanham.com:443 {
         reverse_proxy localhost:8151
     }
 
-    # Protected: everything else (dashboard, API, MCP)
+    # Protected: dashboard + any other browser route (/api and /mcp carved out above)
     handle /* {
         forward_auth localhost:8000 {
             uri /auth/verify
@@ -185,18 +197,26 @@ home.stanham.com:443 {
 }
 ```
 
-> **Note:** MCP (`/mcp/*`) is routed under the catch-all and reaches Latarnia's MCP gateway. Caddy's `forward_auth` validates the session cookie path for browser-based MCP; machine clients bypass Caddy's `forward_auth` by sending a Bearer token that Latarnia's gateway validates internally.
+> **Note:** `/api/*` and `/mcp/*` are proxied straight to Latarnia **without**
+> `forward_auth`. Caddy's `forward_auth` only validates the session cookie, so
+> routing these through it would reject every machine (Bearer JWT) request.
+> Instead, Latarnia authenticates them internally — `JWTAuthMiddleware` accepts
+> a Bearer JWT *or* a session cookie on `/api/*`, and the MCP gateway validates
+> the Bearer JWT on `/mcp`. Browser requests to `/api/*` still carry the session
+> cookie (forwarded by Caddy), so both clients are covered.
 
 ## New Latarnia Modules
 
 | Module | Path | Responsibility |
 |---|---|---|
 | `auth.db` | `src/latarnia/auth/db.py` | Platform DB init, migration runner |
-| `auth.totp` | `src/latarnia/auth/totp.py` | TOTP secret gen, encryption, validation |
+| `auth.providers.base` | `src/latarnia/auth/providers/base.py` | `AuthProvider` Protocol — `setup_credentials`, `validate`, `get_setup_form_spec` |
+| `auth.providers.totp` | `src/latarnia/auth/providers/totp.py` | TOTP implementation of `AuthProvider` — secret gen, AES-GCM encryption, code validation |
 | `auth.sessions` | `src/latarnia/auth/sessions.py` | Session create/validate/expire |
 | `auth.roles` | `src/latarnia/auth/roles.py` | Role lookup, assignment, enforcement |
+| `auth.users` | `src/latarnia/auth/users.py` | User CRUD — create (with setup token), list, deactivate |
 | `auth.jwt` | `src/latarnia/auth/jwt.py` | JWT sign, validate, revocation check |
-| `auth.routes` | `src/latarnia/auth/routes.py` | `/auth/*` FastAPI router |
+| `auth.routes` | `src/latarnia/auth/routes.py` | `/auth/*` and `/api/auth/*` FastAPI router |
 | `auth.middleware` | `src/latarnia/auth/middleware.py` | JWT Bearer middleware for `/api/*` and `/mcp/*` |
 | `caddy.manager` | `src/latarnia/caddy/manager.py` | Caddyfile generation and reload |
 
