@@ -86,6 +86,7 @@ Each app must include a `latarnia.json` file in its root directory:
 - **config.redis_streams_publish**: Array of stream names this app publishes to (default: []). Each stream can have at most one publisher.
 - **config.redis_streams_subscribe**: Array of stream names this app subscribes to (default: []). Consumer groups are created per subscribing app.
 - **config.requires_secrets**: Array of environment-variable names the app needs at runtime (default: []). The platform injects matching values from `/opt/latarnia/{env}/secrets.env` into the app's process environment at launch (P-0006). The platform refuses to start the app if any declared name is missing from the master file. See the "Secrets" section below for the operator-side contract.
+- **config.public_routes**: Array of path-prefix strings (default: []). Each prefix is served by Caddy without `forward_auth` — fully anonymous, identity headers stripped. The app receives the path with `/apps/{name}` removed (e.g. `/apps/x/b/foo` → `/b/foo`). Validation rules: each entry must start with `/`; entries that are exactly `/`, are empty, or overlap reserved paths (`/health`, `/docs`, `/openapi.json`) are silently dropped with a WARNING log — the app still starts and the Caddyfile is unaffected for those entries. Changes take effect on the next app discovery or platform restart. `/b/` is the platform convention for public bundles (see Path Conventions above).
 - **install.setup_commands**: Shell commands to run during installation
 - **events.publishes**: Array of event types this app publishes (see Redis Events section)
 - **events.subscribes**: Array of event types this app subscribes to (see Redis Events section)
@@ -103,6 +104,23 @@ Each app must include a `latarnia.json` file in its root directory:
 - **min_version**: Minimum semantic version required (inclusive)
 - Dependencies are checked at discovery time. If a required app is not registered or its version is below `min_version`, the dependent app is skipped with an error log.
 - Only direct dependencies are checked — no transitive resolution.
+
+## Reserved Paths
+
+The platform and Caddy unconditionally own certain path prefixes on every app. Apps **must not** define routes under these paths for their own purposes — doing so produces silent conflicts with platform behavior (auth bypass, Swagger exposure, or routing collisions).
+
+| Path prefix | Owner | Behavior |
+|---|---|---|
+| `/health` | Platform | Required health probe. Apps must implement this endpoint exactly as specified below. |
+| `/docs` | Caddy (P-0008 cap-005) | Swagger UI. Caddy bypasses `forward_auth` for this path — it is **always public, no auth required**. Any app route registered here is publicly reachable without a session. |
+| `/openapi.json` | Caddy (P-0008 cap-005) | OpenAPI schema. Same public bypass as `/docs`. |
+| `/b/` | Platform convention | Public bundle hosting prefix. Routes under `/b/` are served without `forward_auth` when `public_routes` includes this prefix in the manifest. Reserved so all apps using the public-bundle pattern use a consistent, well-known namespace. Do not use `/b/` for authenticated routes. |
+
+**Why this matters for `/docs`:** Caddy's `forward_auth` bypass is a blanket rule matched by path prefix — it does not check what the app actually serves at that path. An app that registers its own business logic at `/docs` will expose that logic to anyone on the network without authentication.
+
+**`/b/` and `public_routes` (T-0004):** Apps declare public prefixes via `public_routes` (array of path strings, default `[]`) in `manifest.config`. The Caddyfile generator emits a `handle` block for each prefix — no `forward_auth`, identity headers stripped — before the protected `handle_path /apps/{name}/*` block. See Optional Fields below for the full spec including validation rules.
+
+---
 
 ## Service App Requirements
 

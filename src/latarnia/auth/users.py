@@ -115,11 +115,88 @@ class UserStore:
         )
 
     # ------------------------------------------------------------------
-    # Deactivation
+    # Deactivation / deletion
     # ------------------------------------------------------------------
 
-    def deactivate_user(self, user_id) -> None:
-        """Deactivate and invalidate all of the user's sessions."""
+    def deactivate_user(self, user_id, token_store=None) -> None:
+        """Deactivate, invalidate sessions, and revoke machine tokens."""
         self.db.execute("UPDATE users SET is_active = FALSE WHERE id = %s", (user_id,))
         self.db.execute("DELETE FROM sessions WHERE user_id = %s", (user_id,))
-        logger.info("Deactivated user %s and cleared their sessions", user_id)
+        if token_store is not None:
+            token_store.revoke_all_for_user(user_id)
+        logger.info("Deactivated user %s, cleared sessions, revoked machine tokens", user_id)
+
+    def delete_user(self, user_id, requester_id) -> None:
+        """Permanently delete a user and all their owned rows (CASCADE).
+
+        Guards:
+        - No self-delete (requester_id == user_id → ValueError).
+        - Cannot delete the last active Superuser → ValueError.
+        The granted_by FK in app_roles/machine_tokens is SET NULL (migration 006),
+        so other users' roles/tokens granted by the deleted user survive.
+        """
+        if str(requester_id) == str(user_id):
+            raise ValueError("Cannot delete yourself")
+        target = self.get_user_by_id(user_id)
+        if not target:
+            raise LookupError("User not found")
+        if target["is_superuser"] and target["is_active"]:
+            row = self.db.query_one(
+                "SELECT COUNT(*) AS n FROM users WHERE is_superuser = TRUE AND is_active = TRUE"
+            )
+            if int((row or {}).get("n", 0)) <= 1:
+                raise ValueError("Cannot delete the last active Superuser")
+        self.db.execute("DELETE FROM users WHERE id = %s", (user_id,))
+        logger.info("Deleted user %s (by %s)", user_id, requester_id)
+
+    # ------------------------------------------------------------------
+    # Reactivation
+    # ------------------------------------------------------------------
+
+    def reactivate_user(self, user_id, totp_provider=None) -> None:
+        """Re-activate a deactivated user who still holds TOTP credentials.
+
+        Raises ValueError (409) if the user has no TOTP credential — the caller
+        should re-issue a setup token instead.
+        """
+        target = self.get_user_by_id(user_id)
+        if not target:
+            raise LookupError("User not found")
+        if totp_provider is not None and totp_provider.get_existing_secret(user_id) is None:
+            raise ValueError("User has no TOTP credential — re-issue a setup token first")
+        self.db.execute("UPDATE users SET is_active = TRUE WHERE id = %s", (user_id,))
+        logger.info("Reactivated user %s", user_id)
+
+    # ------------------------------------------------------------------
+    # Re-issue TOTP setup
+    # ------------------------------------------------------------------
+
+    def reissue_setup_token(self, user_id, totp_provider, token_store,
+                            setup_ttl_hours: int = 24) -> str:
+        """Deactivate the user, delete their TOTP credential, revoke machine tokens,
+        and mint a fresh setup token. Returns the raw setup token.
+
+        The caller should present the returned token as a setup URL
+        (/auth/setup?token=<token>). Completing setup via that URL will mint a
+        fresh TOTP secret and re-activate the user.
+        """
+        # Delete the existing TOTP credential so ensure_credentials mints a
+        # fresh secret (rather than returning the old one via get_existing_secret).
+        self.db.execute(
+            "DELETE FROM user_credentials WHERE user_id = %s AND auth_method = 'totp'",
+            (user_id,),
+        )
+        # Revoke all active machine tokens.
+        token_store.revoke_all_for_user(user_id)
+        # Invalidate all sessions.
+        self.db.execute("DELETE FROM sessions WHERE user_id = %s", (user_id,))
+        # Deactivate and mint a new setup token.
+        token = secrets.token_urlsafe(32)
+        expires = datetime.now(timezone.utc) + timedelta(hours=setup_ttl_hours)
+        self.db.execute(
+            "UPDATE users SET is_active = FALSE, setup_token = %s, "
+            "setup_token_expires_at = %s WHERE id = %s",
+            (token, expires, user_id),
+        )
+        logger.info("Re-issued setup token for user %s (old TOTP deleted, tokens revoked)", user_id)
+        return token

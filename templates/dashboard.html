@@ -8,8 +8,10 @@
       <button id="hh-api-tokens-btn" class="btn btn-outline-dark btn-sm" style="display:none">🔑 API Tokens</button>
       <button id="hh-users-roles-btn" class="btn btn-outline-dark btn-sm" style="display:none">👥 Users &amp; Roles</button>
       <button id="hh-refresh-all" class="btn btn-outline-primary btn-sm">🔄 Refresh</button>
+      {% if is_superuser %}
       <button onclick="viewLatarniaLogs()" class="btn btn-outline-secondary btn-sm">📋 Latarnia Logs</button>
       <button onclick="restartLatarnia()" class="btn btn-outline-warning btn-sm">🔄 Restart Latarnia</button>
+      {% endif %}
       <button id="hh-signout-btn" class="btn btn-outline-danger btn-sm" style="display:none">Sign Out</button>
       <small class="text-muted d-block">Last Updated: <span id="hh-last-updated">--:--</span></small>
     </div>
@@ -1204,11 +1206,19 @@
     const tag = u.is_superuser ? '<span class="badge bg-dark">superuser</span>'
       : (u.is_active ? '<span class="badge bg-success">active</span>'
                      : '<span class="badge bg-secondary">inactive</span>');
-    const canDeactivate = (u.username !== currentUsername) && !u.is_superuser;
+    const isSelf = (u.username === currentUsername);
     const safeName = esc(u.username);
-    const deactivateBtn = canDeactivate
-      ? `<button class="btn btn-sm btn-outline-danger" onclick="deactivateUser('${u.id}','${safeName}')">Deactivate</button>`
-      : "";
+    // Build action buttons — non-superuser users only (can't manage superusers).
+    let actionBtns = "";
+    if (!u.is_superuser && !isSelf) {
+      if (u.is_active) {
+        actionBtns += `<button class="btn btn-sm btn-outline-warning ms-1" onclick="deactivateUser('${u.id}','${safeName}')">Deactivate</button>`;
+      } else {
+        actionBtns += `<button class="btn btn-sm btn-outline-success ms-1" onclick="activateUser('${u.id}','${safeName}')">Activate</button>`;
+      }
+      actionBtns += `<button class="btn btn-sm btn-outline-secondary ms-1" onclick="reissueSetupToken('${u.id}','${safeName}')">Re-issue setup</button>`;
+      actionBtns += `<button class="btn btn-sm btn-outline-danger ms-1" onclick="deleteUser('${u.id}','${safeName}')">Delete</button>`;
+    }
     let body;
     if (u.is_superuser) {
       body = '<p class="text-muted small mb-0">Superuser has full access to all apps.</p>';
@@ -1226,7 +1236,8 @@
     }
     return `<div class="card mb-3"><div class="card-body">
       <div class="d-flex justify-content-between align-items-center mb-2">
-        <span class="fw-semibold">${safeName} ${tag}</span>${deactivateBtn}
+        <span class="fw-semibold">${safeName} ${tag}</span>
+        <span>${actionBtns}</span>
       </div>${body}</div></div>`;
   }
 
@@ -1250,7 +1261,58 @@
   }
 
   async function deactivateUser(userId, username) {
-    if (!confirm(`Deactivate user "${username}"? Their sessions will be revoked.`)) return;
+    if (!confirm(`Deactivate user "${username}"? Their sessions and API tokens will be revoked.`)) return;
+    try {
+      const resp = await fetch(`/api/auth/users/${userId}/deactivate`, { method: "POST" });
+      if (!resp.ok) {
+        const detail = (await resp.json().catch(() => ({}))).detail || resp.status;
+        alert(`Failed: ${detail}`);
+        return;
+      }
+      await loadUsersRoles();
+    } catch (err) {
+      alert(`Failed: ${err.message}`);
+    }
+  }
+
+  async function activateUser(userId, username) {
+    if (!confirm(`Re-activate user "${username}"? Their existing authenticator will still work.`)) return;
+    try {
+      const resp = await fetch(`/api/auth/users/${userId}/activate`, { method: "POST" });
+      if (!resp.ok) {
+        const detail = (await resp.json().catch(() => ({}))).detail || resp.status;
+        alert(`Failed: ${detail}`);
+        return;
+      }
+      await loadUsersRoles();
+    } catch (err) {
+      alert(`Failed: ${err.message}`);
+    }
+  }
+
+  async function reissueSetupToken(userId, username) {
+    if (!confirm(`Re-issue setup link for "${username}"?\n\nThis will:\n• Deactivate the user\n• Delete their authenticator\n• Revoke all their API tokens\n\nThey will need to re-enroll with a new authenticator app.`)) return;
+    try {
+      const resp = await fetch(`/api/auth/users/${userId}/setup-token`, { method: "POST" });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        alert(`Failed: ${data.detail || resp.status}`);
+        return;
+      }
+      const result = document.getElementById("hh-add-user-result");
+      result.className = "alert alert-info small";
+      result.innerHTML = `New setup link for <strong>${esc(username)}</strong> (expires in 24h — copy now):<br>` +
+        `<code>${esc(data.setup_url)}</code> ` +
+        `<button class="btn btn-xs btn-outline-secondary btn-sm" onclick="navigator.clipboard.writeText(${JSON.stringify(data.setup_url)})">Copy</button>`;
+      result.style.display = "block";
+      await loadUsersRoles();
+    } catch (err) {
+      alert(`Failed: ${err.message}`);
+    }
+  }
+
+  async function deleteUser(userId, username) {
+    if (!confirm(`Permanently delete user "${username}"?\n\nThis cannot be undone. All their roles, sessions, and API tokens will be removed.`)) return;
     try {
       const resp = await fetch(`/api/auth/users/${userId}`, { method: "DELETE" });
       if (!resp.ok) {
@@ -1373,6 +1435,10 @@
 
   // Initial load
   refreshDashboard();
+  // Activity WebSocket is Superuser-only (P-0010 cap-005). Non-Superusers
+  // get the filtered REST list on manual refresh instead.
+  {% if is_superuser %}
   connectActivityWebSocket();
+  {% endif %}
 </script>
 {% endblock %}

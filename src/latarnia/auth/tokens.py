@@ -52,6 +52,15 @@ class MachineTokenStore:
         )
         return row is not None
 
+    def revoke_all_for_user(self, user_id) -> None:
+        """Revoke all active machine tokens for a user (deactivate / re-issue)."""
+        self.db.execute(
+            "UPDATE machine_tokens SET revoked_at = NOW() "
+            "WHERE user_id = %s AND revoked_at IS NULL",
+            (user_id,),
+        )
+        logger.info("Revoked all active machine tokens for user %s", user_id)
+
     def is_active(self, token_hash: str) -> bool:
         """True iff a non-revoked record exists for this token hash.
 

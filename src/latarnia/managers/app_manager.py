@@ -60,6 +60,11 @@ class AppConfig(BaseModel):
     # at app launch. Apps refuse to start if any declared name is missing
     # from the master file. Values never appear in logs or REST responses.
     requires_secrets: List[str] = Field(default_factory=list)
+    # T-0004: path prefixes served without forward_auth. Validated at parse
+    # time — invalid entries are dropped with a WARNING so a typo never
+    # fails the app. Reserved paths (/health, /docs, /openapi.json) are also
+    # rejected. The `/b/` prefix is the platform convention for public bundles.
+    public_routes: List[str] = Field(default_factory=list)
 
     @field_validator("requires_secrets")
     @classmethod
@@ -70,6 +75,29 @@ class AppConfig(BaseModel):
                     "requires_secrets entries must be non-empty strings"
                 )
         return v
+
+    @field_validator("public_routes")
+    @classmethod
+    def _validate_public_routes(cls, v: List[str]) -> List[str]:
+        import logging as _logging
+        _log = _logging.getLogger("latarnia.app_manager")
+        _RESERVED = {"/health", "/docs", "/openapi.json"}
+        result: List[str] = []
+        for entry in v:
+            if not entry:
+                _log.warning("public_routes: skipping empty entry")
+                continue
+            if not entry.startswith("/"):
+                _log.warning("public_routes: skipping %r — must start with /", entry)
+                continue
+            if entry == "/":
+                _log.warning("public_routes: skipping '/' — would make whole app public")
+                continue
+            if entry in _RESERVED:
+                _log.warning("public_routes: skipping %r — reserved path", entry)
+                continue
+            result.append(entry)
+        return result
 
 
 class AppInstall(BaseModel):
