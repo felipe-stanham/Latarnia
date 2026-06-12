@@ -8,8 +8,10 @@
       <button id="hh-api-tokens-btn" class="btn btn-outline-dark btn-sm" style="display:none">🔑 API Tokens</button>
       <button id="hh-users-roles-btn" class="btn btn-outline-dark btn-sm" style="display:none">👥 Users &amp; Roles</button>
       <button id="hh-refresh-all" class="btn btn-outline-primary btn-sm">🔄 Refresh</button>
+      {% if is_superuser %}
       <button onclick="viewLatarniaLogs()" class="btn btn-outline-secondary btn-sm">📋 Latarnia Logs</button>
       <button onclick="restartLatarnia()" class="btn btn-outline-warning btn-sm">🔄 Restart Latarnia</button>
+      {% endif %}
       <button id="hh-signout-btn" class="btn btn-outline-danger btn-sm" style="display:none">Sign Out</button>
       <small class="text-muted d-block">Last Updated: <span id="hh-last-updated">--:--</span></small>
     </div>
