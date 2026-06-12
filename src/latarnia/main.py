@@ -12,7 +12,7 @@ from typing import Optional
 import shutil
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 
 from latarnia.core.config import config_manager
 from latarnia.core.redis_client import RedisHealthMonitor
@@ -448,8 +448,7 @@ async def _cleanup_orphaned_apps() -> int:
 
 @app.get("/")
 async def root():
-    """Root endpoint"""
-    return {"message": "Latarnia is running", "version": "0.1.0"}
+    return RedirectResponse("/dashboard", status_code=302)
 
 
 @app.get("/health")

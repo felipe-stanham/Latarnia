@@ -112,7 +112,7 @@ class CaddyConfigManager:
             f"            copy_headers {_COPY_HEADERS}",
             "            @auth_denied status 401",
             "            handle_response @auth_denied {",
-            "                redir * /auth/login?next={http.request.uri.path} 302",
+            "                redir * /auth/login?next={http.request.orig_uri} 302",
             "            }",
             "        }",
         ]
