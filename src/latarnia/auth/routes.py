@@ -94,7 +94,7 @@ def require_superuser(request, *, session_store, user_store, cookie_name):
     if jwt_claims is not None:
         if not jwt_claims.get("super", False):
             raise HTTPException(status_code=403, detail="Superuser required")
-        return None
+        return {"id": jwt_claims.get("sub"), "is_superuser": True}
     user = resolve_session_user(request, session_store, user_store, cookie_name)
     if not user or not user["is_superuser"]:
         raise HTTPException(status_code=403, detail="Superuser required")
@@ -354,15 +354,69 @@ def build_auth_router(auth_db, user_store, session_store, totp_provider,
         return {"setup_url": _public_setup_url(request, token)}
 
     @router.delete("/api/auth/users/{user_id}")
+    async def hard_delete_user(request: Request, user_id: str):
+        """Permanently delete a user (Superuser only).
+
+        Route migration (P-0010 Scope 4): this endpoint previously performed
+        deactivation. That behavior has moved to POST .../deactivate. DELETE
+        now means hard-delete (irreversible).
+        """
+        actor = _require_superuser(request)
+        target = user_store.get_user_by_id(user_id)
+        if not target:
+            raise HTTPException(status_code=404, detail="User not found")
+        try:
+            user_store.delete_user(user_id, actor["id"])
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        return {"success": True, "message": f"User {target['username']} deleted"}
+
+    @router.post("/api/auth/users/{user_id}/deactivate")
     async def deactivate_user(request: Request, user_id: str):
+        """Deactivate a user — sets is_active=FALSE, clears sessions, revokes
+        machine tokens (Superuser only)."""
         actor = _require_superuser(request)
         if str(actor["id"]) == str(user_id):
             raise HTTPException(status_code=403, detail="Cannot deactivate yourself")
         target = user_store.get_user_by_id(user_id)
         if not target:
             raise HTTPException(status_code=404, detail="User not found")
-        user_store.deactivate_user(user_id)
+        user_store.deactivate_user(user_id, token_store=token_store)
         return {"success": True, "message": f"User {target['username']} deactivated"}
+
+    @router.post("/api/auth/users/{user_id}/activate")
+    async def activate_user(request: Request, user_id: str):
+        """Re-activate a deactivated user who still holds TOTP credentials
+        (Superuser only). Does not un-revoke machine tokens."""
+        _require_superuser(request)
+        target = user_store.get_user_by_id(user_id)
+        if not target:
+            raise HTTPException(status_code=404, detail="User not found")
+        try:
+            user_store.reactivate_user(user_id, totp_provider=totp_provider)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        return {"success": True, "message": f"User {target['username']} activated"}
+
+    @router.post("/api/auth/users/{user_id}/setup-token")
+    async def reissue_setup_token(request: Request, user_id: str):
+        """Re-issue a TOTP enrollment link (Superuser only).
+
+        Deactivates the user, deletes their TOTP credential, revokes all their
+        machine tokens, and returns a fresh one-time setup URL.
+        """
+        _require_superuser(request)
+        target = user_store.get_user_by_id(user_id)
+        if not target:
+            raise HTTPException(status_code=404, detail="User not found")
+        if token_store is None:
+            raise HTTPException(status_code=503, detail="Token store unavailable")
+        ttl = config_manager.config.auth.setup_token_ttl_hours
+        token = user_store.reissue_setup_token(
+            user_id, totp_provider=totp_provider,
+            token_store=token_store, setup_ttl_hours=ttl,
+        )
+        return {"success": True, "setup_url": _public_setup_url(request, token)}
 
     # ------------------------------------------------------------------
     # Role API
