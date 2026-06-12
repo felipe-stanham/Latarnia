@@ -39,6 +39,7 @@ Latarnia is a unified home automation platform for Raspberry Pi 5 (8GB RAM) that
 | P-0007  | LiteLLM Gateway | [CANCELLED] | Single shared `latarnia-litellm-{env}.service` (systemd, like Redis); `LiteLLMProvisioner` provisions per-app API keys and injects `LITELLM_BASE_URL`/`LITELLM_API_KEY` into app environments; model gate blocks startup if declared models are unavailable. Cancelled — no concrete need at current scale. |
 | P-0008  | Caddy + Auth    | [DONE] | Replace `web_proxy.py` with Caddy (TLS, forward_auth); TOTP login (no passwords); per-app role model (none/webUI-low/webUI-med/webUI-full/full); JWT machine tokens for API/MCP; `X-Latarnia-App-Role` header injection; `latarnia_platform_{env}` Postgres DB for auth state. |
 | P-0009  | App Lifecycle Cleanup | [DONE] | Orphan detection on discovery (auto-stop+unlink unit for deleted app folders); full-teardown DELETE endpoint; Delete App button in dashboard detail modal. |
+| P-0010  | Auth Follow-ups & Authz Hardening | [ ] Not Started | P-0008 follow-ups before prd: root→/dashboard redirect; post-login return-to-URL + open-redirect hardening; Superuser-only platform restart & logs (API 403 + UI hide); activity feed filtered to `full`-role apps; user hard-delete (migration 006 `granted_by` SET NULL) + reactivate + re-issue TOTP setup. |
 
 ## Testing Tools
 
