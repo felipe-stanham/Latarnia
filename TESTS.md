@@ -82,7 +82,7 @@ Critical-path tests for Latarnia. Each test is declarative — Claude Code gener
 
 - **test_health_endpoint_redis_down:** Mock `redis_monitor.get_redis_metrics()` to return `{"status": "error"}`. Mock `system_monitor.get_hardware_metrics()` to return valid metrics. Send GET to `/health`. -> Response status 200. JSON body has `health == "error"` and `message` contains `"Redis connection failed"`.
 
-- **test_root_endpoint:** Send GET to `/`. -> Response status 200. JSON body has `message == "Latarnia is running"` and `version == "0.1.0"`.
+- **test_root_endpoint:** Send GET to `/` (no follow-redirects). -> Response status 302 with `Location: /dashboard`.
 
 - **test_get_all_apps_endpoint:** Mock `app_manager.registry.get_all_apps()` to return a list with one app entry (mocked `to_dict()` returning `{"app_id": "test-1", "name": "test"}`). Send GET to `/api/apps`. -> Response status 200. JSON body has `total_count == 1` and `apps` is a list of length 1.
 
