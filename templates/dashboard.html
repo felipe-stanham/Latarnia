@@ -1375,6 +1375,10 @@
 
   // Initial load
   refreshDashboard();
+  // Activity WebSocket is Superuser-only (P-0010 cap-005). Non-Superusers
+  // get the filtered REST list on manual refresh instead.
+  {% if is_superuser %}
   connectActivityWebSocket();
+  {% endif %}
 </script>
 {% endblock %}

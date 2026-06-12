@@ -1084,72 +1084,119 @@ async def get_latarnia_logs(request: Request, lines: int = 100):
 
 
 @app.get("/api/activity/recent")
-async def get_recent_activity(limit: int = 10):
-    """Get recent Redis pub/sub events"""
+async def get_recent_activity(request: Request, limit: int = 10):
+    """Get recent Redis stream events, filtered by the caller's role.
+
+    Superuser: all events returned unchanged.
+    Non-Superuser: default-deny — an event is kept only if its `source` equals
+    a registered App name and the caller holds the `full` role for that app.
+    Unresolvable sources (system events, raw stream names, unknown strings) are
+    always dropped for non-Superusers.
+    """
     try:
         import redis
         import json
         from datetime import datetime
-        
-        # Connect to Redis
+
+        # Resolve current principal (Bearer or session).
+        user = _session_user(request)
+        jwt_claims = getattr(getattr(request, "state", None), "jwt_claims", None)
+        is_super = (
+            (jwt_claims is not None and jwt_claims.get("super", False))
+            or (user is not None and user["is_superuser"])
+        )
+
+        # Build the set of app names visible to this principal (for fast lookup).
+        if not is_super:
+            app_names = {
+                app.name for app in app_manager.registry.get_all_apps()
+            }
+
         redis_client = redis.from_url(config_manager.get_redis_url())
-        
         activities = []
-        
-        # Get events from the recent events list (stored by background subscriber)
         events_key = "latarnia:events:recent"
-        
-        # Get the latest events
         total_events = redis_client.llen(events_key)
-        
+
         if total_events > 0:
-            # Get the last N events (newest at the end of the list)
             start_index = max(0, total_events - limit)
             events = redis_client.lrange(events_key, start_index, -1)
-            
-            # Reverse to show newest first
             events.reverse()
-            
+
             for event in events:
                 try:
                     event_data = json.loads(event)
-                    
-                    # Format timestamp
-                    timestamp_val = event_data.get('timestamp', '')
+
+                    if not is_super:
+                        source = event_data.get("source", "")
+                        # Default-deny: drop if source is not a registered app name.
+                        if source not in app_names:
+                            continue
+                        # Drop if the caller doesn't hold the 'full' role for that app.
+                        caller_id = user["id"] if user else None
+                        if caller_id is None:
+                            continue
+                        if role_store.get_role(caller_id, source) != "full":
+                            continue
+
+                    timestamp_val = event_data.get("timestamp", "")
                     if isinstance(timestamp_val, (int, float)):
-                        timestamp_str = datetime.fromtimestamp(timestamp_val).strftime('%Y-%m-%d %H:%M:%S')
+                        timestamp_str = datetime.fromtimestamp(timestamp_val).strftime(
+                            "%Y-%m-%d %H:%M:%S"
+                        )
                     else:
                         timestamp_str = str(timestamp_val)
-                    
-                    # Extract message from event data
-                    message = ''
-                    if 'data' in event_data and 'content' in event_data['data']:
-                        message = event_data['data']['content']
-                    elif 'event_type' in event_data:
+
+                    message = ""
+                    if "data" in event_data and "content" in event_data["data"]:
+                        message = event_data["data"]["content"]
+                    elif "event_type" in event_data:
                         message = f"Event: {event_data['event_type']}"
                     else:
-                        message = json.dumps(event_data.get('data', {}))
-                    
+                        message = json.dumps(event_data.get("data", {}))
+
                     activities.append({
-                        'timestamp': timestamp_str,
-                        'message': message,
-                        'sender': event_data.get('source', 'unknown'),
-                        'data': event_data
+                        "timestamp": timestamp_str,
+                        "message": message,
+                        "sender": event_data.get("source", "unknown"),
+                        "data": event_data,
                     })
                 except Exception as e:
-                    logger.warning(f"Failed to parse Redis event: {e}")
+                    logger.warning("Failed to parse Redis event: %s", e)
                     continue
-        
+
         return {"success": True, "data": {"activities": activities, "count": len(activities)}}
-        
+
     except Exception as e:
-        logger.error(f"Failed to get recent activity: {e}")
+        logger.error("Failed to get recent activity: %s", e)
         return {"success": True, "data": {"activities": [], "count": 0, "error": str(e)}}
 
 
 @app.websocket("/ws/activity")
 async def activity_websocket(websocket: WebSocket):
-    """WebSocket endpoint for real-time stream activity updates."""
+    """WebSocket endpoint for real-time stream activity updates (Superuser only).
+
+    Resolves the session user from the cookie at connect; rejects non-Superusers
+    with close code 4403 before any event is delivered.
+    """
+    cookie_name = config_manager.config.auth.cookie_name
+    cookie_header = websocket.headers.get("cookie", "")
+    token = None
+    if cookie_header:
+        from http.cookies import SimpleCookie
+        jar = SimpleCookie()
+        try:
+            jar.load(cookie_header)
+            morsel = jar.get(cookie_name)
+            token = morsel.value if morsel else None
+        except Exception:
+            pass
+
+    uid = session_store.validate_session(token) if token else None
+    user = user_store.get_user_by_id(uid) if uid else None
+    if not user or not user["is_active"] or not user["is_superuser"]:
+        await websocket.close(code=4403)
+        return
+
     await event_subscriber.ws_manager.connect(websocket)
     try:
         while True:
