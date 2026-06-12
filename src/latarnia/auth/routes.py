@@ -82,6 +82,25 @@ def resolve_session_user(request, session_store, user_store, cookie_name):
     return user_store.get_user_by_id(uid)
 
 
+def require_superuser(request, *, session_store, user_store, cookie_name):
+    """Assert that the current principal is a Superuser; raise 403 otherwise.
+
+    Handles both principals: Bearer JWT (request.state.jwt_claims set by
+    JWTAuthMiddleware) and session cookie (resolved via resolve_session_user).
+    Returns the user row for session callers, or None for Bearer callers (no
+    user row is needed when the JWT already carries a verified super claim).
+    """
+    jwt_claims = getattr(getattr(request, "state", None), "jwt_claims", None)
+    if jwt_claims is not None:
+        if not jwt_claims.get("super", False):
+            raise HTTPException(status_code=403, detail="Superuser required")
+        return None
+    user = resolve_session_user(request, session_store, user_store, cookie_name)
+    if not user or not user["is_superuser"]:
+        raise HTTPException(status_code=403, detail="Superuser required")
+    return user
+
+
 def _qr_data_uri(otpauth_uri: str) -> str:
     """Render a TOTP provisioning URI to a base64 PNG data URI (no PIL)."""
     img = qrcode.make(otpauth_uri, image_factory=PyPNGImage, box_size=6, border=2)
@@ -150,10 +169,12 @@ def build_auth_router(auth_db, user_store, session_store, totp_provider,
         return user
 
     def _require_superuser(request: Request):
-        user = _require_user(request)
-        if not user["is_superuser"]:
-            raise HTTPException(status_code=403, detail="Superuser required")
-        return user
+        return require_superuser(
+            request,
+            session_store=session_store,
+            user_store=user_store,
+            cookie_name=cookie_name,
+        )
 
     def _role_for(user, app_name: Optional[str]) -> str:
         if app_name is None:

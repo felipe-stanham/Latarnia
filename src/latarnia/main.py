@@ -18,7 +18,7 @@ from latarnia.core.config import config_manager
 from latarnia.core.redis_client import RedisHealthMonitor
 from latarnia.core.event_subscriber import AsyncStreamConsumer
 from latarnia.utils.system_monitor import SystemMonitor
-from latarnia.web.dashboard import router as dashboard_router
+from latarnia.web.dashboard import build_dashboard_router
 
 
 # Module-level logger so endpoint handlers can log errors. setup_logging()
@@ -324,7 +324,7 @@ from .auth.providers import TOTPAuthProvider
 from .auth.jwt_auth import JWTAuth
 from .auth.tokens import MachineTokenStore
 from .auth.middleware import JWTAuthMiddleware
-from .auth.routes import build_auth_router, resolve_session_user
+from .auth.routes import build_auth_router, resolve_session_user, require_superuser
 
 
 def _load_platform_secret(name: str) -> Optional[str]:
@@ -391,6 +391,20 @@ def _session_user(request):
     )
 
 
+def _require_superuser(request):
+    """Assert the current principal is a Superuser; raise 403 otherwise.
+
+    Handles both Bearer JWT (request.state.jwt_claims) and session cookie
+    principals. Used for platform-level actions (restart, platform logs).
+    """
+    return require_superuser(
+        request,
+        session_store=session_store,
+        user_store=user_store,
+        cookie_name=config_manager.config.auth.cookie_name,
+    )
+
+
 # Create FastAPI app
 app = FastAPI(
     title="Latarnia",
@@ -415,8 +429,9 @@ app.add_middleware(
 # target). /api/auth/* is gated by the middleware above.
 app.include_router(auth_router)
 
-# Include web dashboard routes
-app.include_router(dashboard_router)
+# Include web dashboard routes — built after auth components are wired so
+# _session_user is available to inject is_superuser into the template context.
+app.include_router(build_dashboard_router(session_resolver=_session_user))
 
 
 async def _cleanup_orphaned_apps() -> int:
@@ -1038,8 +1053,9 @@ async def get_app_logs(app_id: str, lines: int = 100):
 
 
 @app.get("/api/logs/latarnia")
-async def get_latarnia_logs(lines: int = 100):
-    """Get recent Latarnia main application logs"""
+async def get_latarnia_logs(request: Request, lines: int = 100):
+    """Get recent Latarnia main application logs (Superuser only)."""
+    _require_superuser(request)
     try:
         from pathlib import Path
         
@@ -1563,8 +1579,9 @@ async def get_app_process_info(app_id: str):
 
 
 @app.post("/api/system/restart")
-async def restart_latarnia():
-    """Restart Latarnia application"""
+async def restart_latarnia(request: Request):
+    """Restart Latarnia application (Superuser only)."""
+    _require_superuser(request)
     import asyncio
     import os
     import platform
