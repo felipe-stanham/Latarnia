@@ -2,7 +2,8 @@
 Integration tests for the P-0008 auth flow (real Postgres, FastAPI TestClient).
 
 Covers cap-009 (setup), cap-010 (login), cap-011 (session/logout),
-cap-012 (verify + headers), cap-013 (encrypted secret), cap-024 (user mgmt).
+cap-012 (verify + headers), cap-013 (encrypted secret), cap-024 (user mgmt),
+P-0010 cap-006/007/008 (hard-delete, reactivate, re-issue setup).
 
 Skipped automatically when Postgres is unreachable.
 """
@@ -15,9 +16,11 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from latarnia.auth import AuthDB
+from latarnia.auth.jwt_auth import JWTAuth
 from latarnia.auth.providers import TOTPAuthProvider
 from latarnia.auth.routes import build_auth_router
 from latarnia.auth.sessions import SessionStore
+from latarnia.auth.tokens import MachineTokenStore
 from latarnia.auth.users import UserStore, BOOTSTRAP_USERNAME
 from latarnia.core.config import ConfigManager
 from latarnia.core.pg_client import PgClient
@@ -41,15 +44,24 @@ def ctx(monkeypatch):
         pg.drop_database(TEST_DB)
     assert db.initialize()
 
-    key = os.urandom(32)
+    totp_key = os.urandom(32)
+    jwt_secret = os.urandom(32).hex()
     users = UserStore(db)
     sessions = SessionStore(db, cfg)
-    totp = TOTPAuthProvider(db, lambda: key, issuer="Test")
+    totp = TOTPAuthProvider(db, lambda: totp_key, issuer="Test")
+    jwt_auth = JWTAuth(lambda: jwt_secret)
+    token_store = MachineTokenStore(db, jwt_auth)
     app = FastAPI()
-    app.include_router(build_auth_router(db, users, sessions, totp, cfg))
+    app.include_router(
+        build_auth_router(db, users, sessions, totp, cfg,
+                         jwt_auth=jwt_auth, token_store=token_store)
+    )
     client = TestClient(app, follow_redirects=False)
 
-    yield {"client": client, "db": db, "users": users, "totp": totp, "pg": pg}
+    yield {
+        "client": client, "db": db, "users": users, "totp": totp,
+        "token_store": token_store, "pg": pg,
+    }
 
     pg.drop_database(TEST_DB)
 
@@ -198,16 +210,139 @@ def test_user_management_lifecycle(ctx):
                     cookies={COOKIE: bob_token})
     assert r.status_code == 403
 
-    # Superuser cannot deactivate themselves.
+    # Hard-delete self is refused (409) — deactivate_moved_route guard.
     client.cookies.clear()
     r = client.request("DELETE", f"/api/auth/users/{admin['id']}",
                        cookies={COOKIE: admin_token})
-    assert r.status_code == 403
+    assert r.status_code == 409
 
-    # Superuser deactivates bob -> his sessions are invalidated.
+    # Superuser deactivates bob via the new /deactivate route.
+    client.cookies.clear()
+    r = client.post(f"/api/auth/users/{bob['id']}/deactivate",
+                    cookies={COOKIE: admin_token})
+    assert r.status_code == 200
+    # Bob's session is now invalid.
+    client.cookies.clear()
+    assert client.get("/auth/verify", cookies={COOKIE: bob_token}).status_code == 401
+
+
+# -------------------------------------------------------- P-0010 cap-006/007/008
+
+def _enroll_user(ctx, username, admin_token):
+    """Helper: create and fully enroll a new user. Returns (user_row, secret, session_token)."""
+    client, users, totp = ctx["client"], ctx["users"], ctx["totp"]
+    client.cookies.clear()
+    r = client.post("/api/auth/users", json={"username": username},
+                    cookies={COOKIE: admin_token})
+    assert r.status_code == 200
+    setup_token = r.json()["setup_url"].split("token=")[1]
+    client.cookies.clear()
+    user = users.get_user_by_username(username)
+    secret = totp.get_existing_secret(user["id"])
+    r = client.post(f"/auth/setup?token={setup_token}",
+                    data={"code": pyotp.TOTP(secret).now()})
+    assert r.status_code == 303
+    return users.get_user_by_username(username), secret, r.cookies[COOKIE]
+
+
+def test_hard_delete_removes_user(ctx):
+    client = ctx["client"]
+    admin, _, admin_token = _complete_first_setup(ctx)
+    bob, _, bob_token = _enroll_user(ctx, "bob", admin_token)
+
+    # Hard-delete bob.
     client.cookies.clear()
     r = client.request("DELETE", f"/api/auth/users/{bob['id']}",
                        cookies={COOKIE: admin_token})
     assert r.status_code == 200
+
+    # Bob's row is gone.
+    assert ctx["users"].get_user_by_username("bob") is None
+
+    # Bob's session is now invalid (CASCADE removed sessions).
     client.cookies.clear()
     assert client.get("/auth/verify", cookies={COOKIE: bob_token}).status_code == 401
+
+
+def test_hard_delete_self_forbidden(ctx):
+    client = ctx["client"]
+    admin, _, admin_token = _complete_first_setup(ctx)
+    client.cookies.clear()
+    r = client.request("DELETE", f"/api/auth/users/{admin['id']}",
+                       cookies={COOKIE: admin_token})
+    assert r.status_code == 409
+    assert ctx["users"].get_user_by_username("admin") is not None
+
+
+def test_reactivate_user(ctx):
+    client = ctx["client"]
+    admin, _, admin_token = _complete_first_setup(ctx)
+    bob, bob_secret, bob_token = _enroll_user(ctx, "bob", admin_token)
+
+    # Deactivate bob.
+    client.cookies.clear()
+    client.post(f"/api/auth/users/{bob['id']}/deactivate",
+                cookies={COOKIE: admin_token})
+
+    # Re-activate bob.
+    client.cookies.clear()
+    r = client.post(f"/api/auth/users/{bob['id']}/activate",
+                    cookies={COOKIE: admin_token})
+    assert r.status_code == 200
+    fresh = ctx["users"].get_user_by_username("bob")
+    assert fresh["is_active"] is True
+
+
+def test_reactivate_without_credential_rejected(ctx):
+    client, users = ctx["client"], ctx["users"]
+    admin, _, admin_token = _complete_first_setup(ctx)
+
+    # Create a user but do NOT complete enrollment (no TOTP credential).
+    client.cookies.clear()
+    r = client.post("/api/auth/users", json={"username": "ghost"},
+                    cookies={COOKIE: admin_token})
+    ghost = users.get_user_by_username("ghost")
+
+    # Attempt to activate a user with no credential.
+    client.cookies.clear()
+    r = client.post(f"/api/auth/users/{ghost['id']}/activate",
+                    cookies={COOKIE: admin_token})
+    assert r.status_code == 409
+
+
+def test_reissue_setup_token(ctx):
+    client = ctx["client"]
+    admin, _, admin_token = _complete_first_setup(ctx)
+    bob, old_secret, _ = _enroll_user(ctx, "bob", admin_token)
+
+    # Re-issue setup for bob.
+    client.cookies.clear()
+    r = client.post(f"/api/auth/users/{bob['id']}/setup-token",
+                    cookies={COOKIE: admin_token})
+    assert r.status_code == 200
+    new_setup_url = r.json()["setup_url"]
+    assert "token=" in new_setup_url
+
+    # Bob is now inactive.
+    fresh = ctx["users"].get_user_by_username("bob")
+    assert fresh["is_active"] is False
+
+    # Old TOTP credential is gone.
+    assert ctx["totp"].get_existing_secret(bob["id"]) is None
+
+    # Complete re-enrollment with the new setup token.
+    new_token = new_setup_url.split("token=")[1]
+    client.cookies.clear()
+    r = client.get(f"/auth/setup?token={new_token}")
+    assert r.status_code == 200
+    # The new secret must differ from the old one.
+    new_secret = ctx["totp"].get_existing_secret(bob["id"])
+    assert new_secret is not None
+    assert new_secret != old_secret
+
+    client.cookies.clear()
+    r = client.post(f"/auth/setup?token={new_token}",
+                    data={"code": pyotp.TOTP(new_secret).now()})
+    assert r.status_code == 303
+    # Bob is now active again.
+    assert ctx["users"].get_user_by_username("bob")["is_active"] is True
