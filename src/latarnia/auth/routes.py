@@ -41,6 +41,26 @@ H_SUPER = "X-Latarnia-Is-Super"
 
 DASHBOARD_PATH = "/dashboard"
 
+
+def safe_next(next_param: Optional[str]) -> str:
+    """Return a validated same-origin redirect target, or DASHBOARD_PATH.
+
+    Accepts `next` only if it starts with a single '/', does not start with
+    '//' or '/\\', and contains no '://'. Tolerates '?' in otherwise-safe
+    values (orig_uri carries the original query string). Falls back to
+    DASHBOARD_PATH on any violation so open-redirect is impossible.
+    """
+    if not next_param:
+        return DASHBOARD_PATH
+    if not next_param.startswith("/"):
+        return DASHBOARD_PATH
+    if next_param.startswith("//") or next_param.startswith("/\\"):
+        return DASHBOARD_PATH
+    if "://" in next_param:
+        return DASHBOARD_PATH
+    return next_param
+
+
 # Usernames are constrained to a safe, render-friendly character set. This is
 # the authoritative defense against HTML/JS injection via a username that is
 # later interpolated into the dashboard (the dashboard also escapes, belt-and-
@@ -238,7 +258,7 @@ def build_auth_router(auth_db, user_store, session_store, totp_provider,
         user_store.touch_last_login(user["id"])
         client_ip = request.client.host if request.client else ""
         sess = session_store.create_session(user["id"], client_ip)
-        target = next if (next and next.startswith("/")) else DASHBOARD_PATH
+        target = safe_next(next)
         resp = RedirectResponse(target, status_code=303)
         _set_session_cookie(resp, sess)
         return resp

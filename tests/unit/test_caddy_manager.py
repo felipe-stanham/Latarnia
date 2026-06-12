@@ -108,24 +108,24 @@ def test_catch_all_still_protected(tmp_path, monkeypatch):
 
 
 def test_catch_all_redirects_unauthenticated_to_login(tmp_path, monkeypatch):
-    # T-0003 / t3-001: a 401 from /auth/verify must become a 302 -> /auth/login
-    # for the browser, preserving the original path as `next`.
+    # P-0010 cap-002: a 401 from /auth/verify must become a 302 -> /auth/login
+    # preserving the *original* URI (pre-handle_path-strip) via orig_uri.
     mgr = _manager(tmp_path, [], monkeypatch, env="dev")
     config = mgr.generate_config()
     body = _block_body(config, "handle /* {")
     assert "@auth_denied status 401" in body
     assert "handle_response @auth_denied {" in body
-    assert "redir * /auth/login?next={http.request.uri.path} 302" in body
+    assert "redir * /auth/login?next={http.request.orig_uri} 302" in body
 
 
 def test_app_webui_redirects_unauthenticated_to_login(tmp_path, monkeypatch):
-    # T-0003 / t3-002: per-app webUI blocks get the same 401 -> login redirect.
+    # P-0010 cap-002: per-app webUI blocks get the same orig_uri redirect.
     apps = [_make_app("my_app", port=8151)]
     mgr = _manager(tmp_path, apps, monkeypatch, env="dev")
     config = mgr.generate_config()
     body = _block_body(config, "handle_path /apps/my_app/* {")
     assert "@auth_denied status 401" in body
-    assert "redir * /auth/login?next={http.request.uri.path} 302" in body
+    assert "redir * /auth/login?next={http.request.orig_uri} 302" in body
 
 
 def test_machine_surfaces_have_no_login_redirect(tmp_path, monkeypatch):
