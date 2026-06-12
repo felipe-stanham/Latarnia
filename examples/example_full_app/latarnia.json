@@ -16,7 +16,8 @@
     "restart_policy": "always",
     "redis_streams_publish": ["example.events.created"],
     "redis_streams_subscribe": ["example.commands.process"],
-    "requires_secrets": ["EXAMPLE_API_KEY"]
+    "requires_secrets": ["EXAMPLE_API_KEY"],
+    "public_routes": ["/b/"]
   },
   "requires": [
     {"app": "example_companion", "min_version": "1.0.0"}
