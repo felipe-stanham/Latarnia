@@ -104,6 +104,23 @@ Each app must include a `latarnia.json` file in its root directory:
 - Dependencies are checked at discovery time. If a required app is not registered or its version is below `min_version`, the dependent app is skipped with an error log.
 - Only direct dependencies are checked — no transitive resolution.
 
+## Reserved Paths
+
+The platform and Caddy unconditionally own certain path prefixes on every app. Apps **must not** define routes under these paths for their own purposes — doing so produces silent conflicts with platform behavior (auth bypass, Swagger exposure, or routing collisions).
+
+| Path prefix | Owner | Behavior |
+|---|---|---|
+| `/health` | Platform | Required health probe. Apps must implement this endpoint exactly as specified below. |
+| `/docs` | Caddy (P-0008 cap-005) | Swagger UI. Caddy bypasses `forward_auth` for this path — it is **always public, no auth required**. Any app route registered here is publicly reachable without a session. |
+| `/openapi.json` | Caddy (P-0008 cap-005) | OpenAPI schema. Same public bypass as `/docs`. |
+| `/b/` | Platform convention | Public bundle hosting prefix. Routes under `/b/` are served without `forward_auth` when `public_routes` includes this prefix in the manifest. Reserved so all apps using the public-bundle pattern use a consistent, well-known namespace. Do not use `/b/` for authenticated routes. |
+
+**Why this matters for `/docs`:** Caddy's `forward_auth` bypass is a blanket rule matched by path prefix — it does not check what the app actually serves at that path. An app that registers its own business logic at `/docs` will expose that logic to anyone on the network without authentication.
+
+**`/b/` and `public_routes` (planned):** The `public_routes` manifest field (not yet shipped) will tell the Caddyfile generator to omit `forward_auth` for declared prefixes. `/b/` is the canonical prefix for this pattern. Apps that need unauthenticated public serving (e.g. Okno bundle hosting) should use `/b/` as the path root.
+
+---
+
 ## Service App Requirements
 
 ### Required API Endpoints

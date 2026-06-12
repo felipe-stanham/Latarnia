@@ -46,7 +46,9 @@ the existing P-0008 dashboard; only the changed zones are detailed.
 
 > Server enforces the same rules: `POST /api/system/restart` and
 > `GET /api/logs/latarnia` return 403 for alice even if called directly;
-> `/api/activity/recent` returns the already-filtered list.
+> `/api/activity/recent` returns the already-filtered list. The activity panel
+> for non-Superusers is REST-only (refresh to update) — the page does not open
+> the `/ws/activity` WebSocket, and the server refuses it anyway (Superuser-only).
 
 ## Screen: Users & Roles (Superuser only) [cap-006, cap-007, cap-008]
 
@@ -71,6 +73,11 @@ Action rules:
 - Inactive user (`bob`): shows **Activate** (cap-007), **Re-issue setup**,
   **Delete**. **Activate** is disabled/replaced with a hint if the user has no
   TOTP credential (server returns 409 → "re-issue setup instead").
+- Wiring: **Deactivate** calls the new `POST /api/auth/users/{id}/deactivate`
+  (the existing `deactivateUser()` JS must be repointed — `DELETE` on that path
+  is now hard-delete). **Delete** calls `DELETE /api/auth/users/{id}` with its
+  own confirm dialog. Deactivate confirm copy should mention API tokens:
+  "Their sessions and API tokens will be revoked."
 
 ## Modal: Re-issue Setup result [cap-008]
 
@@ -79,7 +86,8 @@ Action rules:
 | Re-issue authenticator setup for: bob      |
 +--------------------------------------------+
 | This deactivates bob, ends their sessions, |
-| and resets their authenticator. Continue?  |
+| revokes their API tokens, and resets their |
+| authenticator. Continue?                   |
 |                          [ Cancel ] [ OK ] |
 +--------------------------------------------+
 

@@ -56,7 +56,7 @@ erDiagram
         timestamp expires_at
         timestamp created_at
         uuid granted_by FK "CHANGED 006: ON DELETE SET NULL (was no action)"
-        timestamp revoked_at
+        timestamp revoked_at "set NOW() for all of a user's tokens on deactivate/re-issue (cap-006/008)"
     }
 
     users ||--o{ user_credentials : "has"
@@ -106,11 +106,28 @@ Guards (enforced in application code, not the schema):
 - Refuse if `X` is the requesting user (no self-delete).
 - Refuse if `X` is the only `is_active = TRUE AND is_superuser = TRUE` user.
 
+JWT consequence of delete: `JWTAuthMiddleware` requires a live `machine_tokens`
+row (`tokens.py is_active`), so the cascade alone invalidates the deleted user's
+JWTs — no extra revocation step needed for delete.
+
+## Machine-token revocation (cap-006 deactivate / cap-008 re-issue)
+
+No schema change — uses the existing `revoked_at` column:
+
+```sql
+UPDATE machine_tokens SET revoked_at = NOW()
+WHERE user_id = %s AND revoked_at IS NULL;
+```
+
+Called by deactivate (`POST /api/auth/users/{id}/deactivate`) and re-issue
+(`POST /api/auth/users/{id}/setup-token`). Reactivation (cap-007) does **not**
+clear `revoked_at` — revoked tokens stay dead; new ones are issued normally.
+
 ## No-change confirmations
 
 - No change to `users`, `user_credentials`, `sessions` columns or constraints.
 - cap-007 (reactivate) and cap-008 (re-issue) operate via UPDATE/DELETE on
   existing columns (`is_active`, `setup_token`, `setup_token_expires_at`,
-  `user_credentials`), requiring no schema change.
+  `user_credentials`, `machine_tokens.revoked_at`), requiring no schema change.
 - `docs/System/dataModel.md` must be updated post-implementation to note the
   `ON DELETE SET NULL` on both `granted_by` columns.
