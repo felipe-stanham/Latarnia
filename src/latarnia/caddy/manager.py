@@ -118,7 +118,7 @@ class CaddyConfigManager:
         ]
 
     def _web_ui_apps(self) -> List[tuple]:
-        """Return (app_name, port) for running service apps with a web UI.
+        """Return (app_name, port, public_routes) for running service apps with a web UI.
 
         Only Service Apps are proxied under `/apps/{name}/` — Streamlit Apps
         have their own on-demand launch/modal path and are never routed here.
@@ -136,7 +136,8 @@ class CaddyConfigManager:
             port = getattr(app.runtime_info, "assigned_port", None)
             if not port:
                 continue
-            result.append((app.name, port))
+            public_routes = list(getattr(app.manifest.config, "public_routes", None) or [])
+            result.append((app.name, port, public_routes))
         result.sort()
         return result
 
@@ -184,15 +185,37 @@ class CaddyConfigManager:
         # receives root-relative paths (e.g. /apps/my_app/page -> /page),
         # matching the behaviour of the deleted web_proxy.
         web_ui_apps = self._web_ui_apps()
-        for name, port in web_ui_apps:
+        for name, port, pub_routes in web_ui_apps:
             app_local = f"localhost:{port}"
-            # Public: app swagger (no forward_auth)
+            # Public: app swagger (no forward_auth). Identity headers stripped
+            # so apps can't be spoofed via the public path (T-0004 hardening).
             lines.append(f"    handle_path /apps/{name}/docs* {{")
-            lines.append(f"        reverse_proxy {app_local}")
+            lines.append(f"        reverse_proxy {app_local} {{")
+            lines.append("            header_up -X-Latarnia-User")
+            lines.append("            header_up -X-Latarnia-App-Role")
+            lines.append("            header_up -X-Latarnia-Is-Super")
+            lines.append("        }")
             lines.append("    }")
             lines.append(f"    handle_path /apps/{name}/openapi.json {{")
-            lines.append(f"        reverse_proxy {app_local}")
+            lines.append(f"        reverse_proxy {app_local} {{")
+            lines.append("            header_up -X-Latarnia-User")
+            lines.append("            header_up -X-Latarnia-App-Role")
+            lines.append("            header_up -X-Latarnia-Is-Super")
+            lines.append("        }")
             lines.append("    }")
+            # Public declared routes (no forward_auth). Caddy's handle (not
+            # handle_path) preserves the path matcher, then uri strip_prefix
+            # removes /apps/{name} so the app receives its own root-relative
+            # path (e.g. /apps/x/b/foo → /b/foo). Identity headers stripped.
+            for prefix in pub_routes:
+                lines.append(f"    handle /apps/{name}{prefix}* {{")
+                lines.append(f"        uri strip_prefix /apps/{name}")
+                lines.append(f"        reverse_proxy {app_local} {{")
+                lines.append("            header_up -X-Latarnia-User")
+                lines.append("            header_up -X-Latarnia-App-Role")
+                lines.append("            header_up -X-Latarnia-Is-Super")
+                lines.append("        }")
+                lines.append("    }")
             # Protected: app webUI
             lines.append(f"    handle_path /apps/{name}/* {{")
             lines.extend(self._forward_auth_lines(local))

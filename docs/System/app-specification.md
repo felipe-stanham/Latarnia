@@ -86,6 +86,7 @@ Each app must include a `latarnia.json` file in its root directory:
 - **config.redis_streams_publish**: Array of stream names this app publishes to (default: []). Each stream can have at most one publisher.
 - **config.redis_streams_subscribe**: Array of stream names this app subscribes to (default: []). Consumer groups are created per subscribing app.
 - **config.requires_secrets**: Array of environment-variable names the app needs at runtime (default: []). The platform injects matching values from `/opt/latarnia/{env}/secrets.env` into the app's process environment at launch (P-0006). The platform refuses to start the app if any declared name is missing from the master file. See the "Secrets" section below for the operator-side contract.
+- **config.public_routes**: Array of path-prefix strings (default: []). Each prefix is served by Caddy without `forward_auth` — fully anonymous, identity headers stripped. The app receives the path with `/apps/{name}` removed (e.g. `/apps/x/b/foo` → `/b/foo`). Validation rules: each entry must start with `/`; entries that are exactly `/`, are empty, or overlap reserved paths (`/health`, `/docs`, `/openapi.json`) are silently dropped with a WARNING log — the app still starts and the Caddyfile is unaffected for those entries. Changes take effect on the next app discovery or platform restart. `/b/` is the platform convention for public bundles (see Path Conventions above).
 - **install.setup_commands**: Shell commands to run during installation
 - **events.publishes**: Array of event types this app publishes (see Redis Events section)
 - **events.subscribes**: Array of event types this app subscribes to (see Redis Events section)
@@ -117,7 +118,7 @@ The platform and Caddy unconditionally own certain path prefixes on every app. A
 
 **Why this matters for `/docs`:** Caddy's `forward_auth` bypass is a blanket rule matched by path prefix — it does not check what the app actually serves at that path. An app that registers its own business logic at `/docs` will expose that logic to anyone on the network without authentication.
 
-**`/b/` and `public_routes` (planned):** The `public_routes` manifest field (not yet shipped) will tell the Caddyfile generator to omit `forward_auth` for declared prefixes. `/b/` is the canonical prefix for this pattern. Apps that need unauthenticated public serving (e.g. Okno bundle hosting) should use `/b/` as the path root.
+**`/b/` and `public_routes` (T-0004):** Apps declare public prefixes via `public_routes` (array of path strings, default `[]`) in `manifest.config`. The Caddyfile generator emits a `handle` block for each prefix — no `forward_auth`, identity headers stripped — before the protected `handle_path /apps/{name}/*` block. See Optional Fields below for the full spec including validation rules.
 
 ---
 

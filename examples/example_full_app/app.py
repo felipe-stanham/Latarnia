@@ -312,6 +312,18 @@ async def ui_resources():
     return ["items", "events"]
 
 
+# T-0004: public bundle route — no auth required.
+# Echoes any received X-Latarnia-* request headers in the response body so
+# acceptance tests can verify that Caddy strips identity headers on public blocks.
+@rest_app.get("/b/test")
+async def public_bundle_test(request: Request):
+    latarnia_headers = {
+        k: v for k, v in request.headers.items()
+        if k.lower().startswith("x-latarnia-")
+    }
+    return {"ok": True, "latarnia_headers_received": latarnia_headers}
+
+
 @rest_app.get("/api/items/{item_id}")
 async def get_item(item_id: int):
     conn = _get_db_connection()
