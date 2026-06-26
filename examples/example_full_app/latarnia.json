@@ -1,7 +1,7 @@
 {
   "name": "example_full_app",
   "type": "service",
-  "description": "Full-featured example app demonstrating all Latarnia capabilities",
+  "description": "Full-featured example app demonstrating all Latarnia capabilities, including P-0008 role-aware behaviour: the webUI and MCP tools adapt to the X-Latarnia-App-Role header (no new manifest fields required).",
   "version": "1.0.0",
   "author": "Latarnia",
   "main_file": "app.py",
@@ -16,7 +16,8 @@
     "restart_policy": "always",
     "redis_streams_publish": ["example.events.created"],
     "redis_streams_subscribe": ["example.commands.process"],
-    "requires_secrets": ["EXAMPLE_API_KEY"]
+    "requires_secrets": ["EXAMPLE_API_KEY"],
+    "public_routes": ["/b/"]
   },
   "requires": [
     {"app": "example_companion", "min_version": "1.0.0"}

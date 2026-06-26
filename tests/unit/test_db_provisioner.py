@@ -41,7 +41,8 @@ def mock_pg_client():
 
 
 @pytest.fixture
-def provisioner(mock_config_manager, mock_pg_client):
+def provisioner(mock_config_manager, mock_pg_client, tmp_path):
+    mock_config_manager.get_data_dir.return_value = tmp_path
     return DbProvisioner(mock_config_manager, mock_pg_client)
 
 

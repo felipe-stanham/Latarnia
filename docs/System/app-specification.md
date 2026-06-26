@@ -86,6 +86,7 @@ Each app must include a `latarnia.json` file in its root directory:
 - **config.redis_streams_publish**: Array of stream names this app publishes to (default: []). Each stream can have at most one publisher.
 - **config.redis_streams_subscribe**: Array of stream names this app subscribes to (default: []). Consumer groups are created per subscribing app.
 - **config.requires_secrets**: Array of environment-variable names the app needs at runtime (default: []). The platform injects matching values from `/opt/latarnia/{env}/secrets.env` into the app's process environment at launch (P-0006). The platform refuses to start the app if any declared name is missing from the master file. See the "Secrets" section below for the operator-side contract.
+- **config.public_routes**: Array of path-prefix strings (default: []). Each prefix is served by Caddy without `forward_auth` — fully anonymous, identity headers stripped. The app receives the path with `/apps/{name}` removed (e.g. `/apps/x/b/foo` → `/b/foo`). Validation rules: each entry must start with `/`; entries that are exactly `/`, are empty, or overlap reserved paths (`/health`, `/docs`, `/openapi.json`) are silently dropped with a WARNING log — the app still starts and the Caddyfile is unaffected for those entries. Changes take effect on the next app discovery or platform restart. `/b/` is the platform convention for public bundles (see Path Conventions above).
 - **install.setup_commands**: Shell commands to run during installation
 - **events.publishes**: Array of event types this app publishes (see Redis Events section)
 - **events.subscribes**: Array of event types this app subscribes to (see Redis Events section)
@@ -103,6 +104,23 @@ Each app must include a `latarnia.json` file in its root directory:
 - **min_version**: Minimum semantic version required (inclusive)
 - Dependencies are checked at discovery time. If a required app is not registered or its version is below `min_version`, the dependent app is skipped with an error log.
 - Only direct dependencies are checked — no transitive resolution.
+
+## Reserved Paths
+
+The platform and Caddy unconditionally own certain path prefixes on every app. Apps **must not** define routes under these paths for their own purposes — doing so produces silent conflicts with platform behavior (auth bypass, Swagger exposure, or routing collisions).
+
+| Path prefix | Owner | Behavior |
+|---|---|---|
+| `/health` | Platform | Required health probe. Apps must implement this endpoint exactly as specified below. |
+| `/docs` | Caddy (P-0008 cap-005) | Swagger UI. Caddy bypasses `forward_auth` for this path — it is **always public, no auth required**. Any app route registered here is publicly reachable without a session. |
+| `/openapi.json` | Caddy (P-0008 cap-005) | OpenAPI schema. Same public bypass as `/docs`. |
+| `/b/` | Platform convention | Public bundle hosting prefix. Routes under `/b/` are served without `forward_auth` when `public_routes` includes this prefix in the manifest. Reserved so all apps using the public-bundle pattern use a consistent, well-known namespace. Do not use `/b/` for authenticated routes. |
+
+**Why this matters for `/docs`:** Caddy's `forward_auth` bypass is a blanket rule matched by path prefix — it does not check what the app actually serves at that path. An app that registers its own business logic at `/docs` will expose that logic to anyone on the network without authentication.
+
+**`/b/` and `public_routes` (T-0004):** Apps declare public prefixes via `public_routes` (array of path strings, default `[]`) in `manifest.config`. The Caddyfile generator emits a `handle` block for each prefix — no `forward_auth`, identity headers stripped — before the protected `handle_path /apps/{name}/*` block. See Optional Fields below for the full spec including validation rules.
+
+---
 
 ## Service App Requirements
 
@@ -243,6 +261,42 @@ All endpoints must return standard HTTP status codes with JSON error responses:
 - `400`: Bad Request
 - `404`: Resource Not Found
 - `500`: Internal Server Error
+
+## Authentication Headers (P-0008)
+
+After P-0008, Caddy is the single ingress and authenticates every request
+before proxying it to your app. On authenticated requests the platform injects
+the following headers so your app knows *who* is calling and at *what access
+level* — your app never implements authentication itself.
+
+All three are set together by `/auth/verify` on an authenticated request; an
+unauthenticated request is intercepted by Caddy and never reaches your app.
+
+| Header | Always present? | Values | Meaning |
+|--------|-----------------|--------|---------|
+| `X-Latarnia-User` | yes (on authenticated requests) | user id (UUID) | The signed-in user. |
+| `X-Latarnia-App-Role` | yes (on authenticated requests) | `none` \| `webUI-low` \| `webUI-med` \| `webUI-full` \| `full` | The caller's role **for your app**. |
+| `X-Latarnia-Is-Super` | yes (on authenticated requests) | `true` \| `false` | Whether the user is the platform superuser (treated as `full`). |
+
+**Role semantics** (your app decides what each level means):
+
+- `none` — no access; the platform won't normally route the user here (the dashboard tile is hidden). Treat as deny.
+- `webUI-low` / `webUI-med` / `webUI-full` — increasing webUI capability. A common pattern: `low` = read-only, `med`+ = create/update, `full` = administrative actions.
+- `full` — full webUI access **plus** REST API access. Superusers always receive `full`.
+
+**Trust model**
+
+- These headers are set by Latarnia/Caddy and are only trustworthy because app
+  ports are not externally reachable (the firewall blocks them — see the ufw
+  rules). Trust `X-Latarnia-*` **only** when your app is reached through the
+  platform, never when its port is directly exposed.
+- Apps must not implement their own login. They receive the user's role and may
+  use it to adjust responses (hide actions, gate writes, etc.).
+
+**Backward compatibility**
+
+- Apps that do not implement role-based logic may ignore these headers entirely
+  and keep working unchanged. The headers are additive.
 
 ## Redis Integration
 
@@ -1018,6 +1072,48 @@ if __name__ == "__main__":
 - The platform does **not** validate MCP tool schemas or responses.
 - The platform does **not** support stdio-based MCP transport.
 - The platform does **not** proxy MCP requests to the app directly. The **MCP Gateway** (`src/latarnia/managers/mcp_gateway.py`, shipped in P-0002) aggregates tools from all healthy MCP-enabled apps into a single SSE endpoint at `/mcp/sse`. External AI clients connect to the gateway, not to individual apps. Apps don't need to know about the gateway — they just expose their MCP server on the assigned `--mcp-port` and the gateway discovers it.
+
+### Role-Aware MCP Tools (P-0008)
+
+When an MCP request reaches your app's MCP server **through the gateway**, the
+gateway forwards the caller's role on the SSE connection as the
+`X-Latarnia-App-Role` header (same values as the webUI header above). The role
+level matches the user's webUI role for your app.
+
+- MCP servers **may** use this header to restrict which tools they expose
+  (`tools/list`) or which they allow to execute (`tools/call`) — e.g. only
+  offer destructive/write tools to `webUI-full` and `full`.
+- This is optional: an app that ignores the header exposes all its tools to any
+  caller the gateway lets through (the gateway already requires a valid,
+  in-scope machine token before connecting).
+
+Read the header per connection and gate accordingly. With the `mcp` SSE
+transport the header arrives in the ASGI connection `scope`:
+
+```python
+from contextvars import ContextVar
+
+_role = ContextVar("mcp_role", default="full")  # default full = backward compatible
+DESTRUCTIVE_ROLES = {"webUI-full", "full"}
+
+async def handle_sse(scope, receive, send):
+    headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
+    token = _role.set(headers.get("x-latarnia-app-role", "full"))
+    try:
+        async with sse_transport.connect_sse(scope, receive, send) as streams:
+            await mcp_server.run(streams[0], streams[1],
+                                 mcp_server.create_initialization_options())
+    finally:
+        _role.reset(token)
+
+@mcp_server.call_tool()
+async def call_tool(name, arguments):
+    if name == "add_item" and _role.get() not in DESTRUCTIVE_ROLES:
+        return [{"type": "text", "text": f"Error: role '{_role.get()}' may not add items"}]
+    ...
+```
+
+(See `examples/example_full_app/app.py` for a complete role-aware example.)
 
 ### Testing Your MCP Server
 

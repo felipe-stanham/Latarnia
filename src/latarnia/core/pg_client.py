@@ -36,6 +36,16 @@ class PgClient:
             self.logger.warning(f"Postgres connectivity check failed: {e}")
             return False
 
+    def get_postgres_metrics(self) -> dict:
+        """Get Postgres connectivity and version info."""
+        try:
+            with self._connect() as conn:
+                row = conn.execute("SELECT version()").fetchone()
+            version = row["version"] if row else "unknown"
+            return {"status": "connected", "version": version}
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+
     def role_exists(self, role_name: str) -> bool:
         """Check if a Postgres role exists."""
         with self._connect() as conn:
@@ -84,6 +94,21 @@ class PgClient:
                 )
             )
         self.logger.info(f"Created database: {db_name} (owner: {owner})")
+
+    def create_plain_database(self, db_name: str) -> None:
+        """CREATE DATABASE owned by the connecting superuser (no separate role).
+
+        Used for the platform-owned auth DB (`latarnia_platform_{env}`), which
+        the platform accesses directly as superuser — unlike per-app DBs that
+        get their own least-privilege role.
+        """
+        with self._connect() as conn:
+            conn.execute(
+                psycopg.sql.SQL("CREATE DATABASE {}").format(
+                    psycopg.sql.Identifier(db_name)
+                )
+            )
+        self.logger.info(f"Created database: {db_name} (superuser-owned)")
 
     def revoke_public_connect(self, db_name: str) -> None:
         """REVOKE CONNECT ON DATABASE FROM PUBLIC."""

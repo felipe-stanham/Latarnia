@@ -243,6 +243,79 @@ erDiagram
     SYSTEM_METRICS ||--|| REDIS_STATUS : contains
 ```
 
+### Platform Auth Database Schema
+
+The platform owns a separate Postgres database — `latarnia_platform_{env}` (e.g., `latarnia_platform_dev`, `latarnia_platform_tst`, `latarnia_platform_prd`) — created and migrated by `AuthDB` (`src/latarnia/auth/db.py`) at Latarnia startup. This DB is **distinct from the per-app databases** provisioned by the DB Provisioner; it uses the platform's admin credentials and is never passed to App processes.
+
+Five tables live in this database. Migrations are in `src/latarnia/auth/migrations/001–005` and applied via the same sequential runner + `schema_versions` pattern used by the DB Provisioner.
+
+```mermaid
+erDiagram
+    users {
+        uuid id PK
+        string username
+        boolean is_superuser
+        boolean is_active
+        string setup_token "nullable; single-use TOTP enrollment token"
+        timestamp setup_token_expires_at "nullable; expires 24h after creation"
+        timestamp created_at
+        timestamp last_login_at
+    }
+
+    user_credentials {
+        uuid id PK
+        uuid user_id FK
+        string auth_method "totp | (future: password, passkey, ...)"
+        jsonb credential_data "method-specific encrypted data"
+        timestamp created_at
+        timestamp updated_at
+    }
+
+    sessions {
+        uuid id PK
+        uuid user_id FK
+        string token_hash "SHA-256 of opaque cookie value; raw UUID never stored"
+        timestamp expires_at "checked on every /auth/verify call"
+        timestamp created_at
+        string ip_address
+    }
+
+    app_roles {
+        uuid id PK
+        uuid user_id FK
+        string app_name "matches latarnia.json name field"
+        string role "none|webUI-low|webUI-med|webUI-full|full"
+        uuid granted_by FK "users.id ON DELETE SET NULL (migration 006)"
+        timestamp granted_at
+    }
+
+    machine_tokens {
+        uuid id PK
+        uuid user_id FK
+        string label "human-readable name for the token"
+        string token_hash "SHA-256 of raw JWT; used for revocation lookup"
+        jsonb app_scope "{ app_name: role } — embedded in JWT claims"
+        timestamp expires_at "null = never expires"
+        timestamp created_at
+        uuid granted_by FK "users.id ON DELETE SET NULL (migration 006)"
+        timestamp revoked_at "null = active; set by revoke/deactivate/re-issue"
+    }
+
+    users ||--o{ user_credentials : "has"
+    users ||--o{ sessions : "has"
+    users ||--o{ app_roles : "assigned to"
+    users ||--o{ machine_tokens : "owns"
+    users ||--o{ app_roles : "grants (granted_by)"
+    users ||--o{ machine_tokens : "grants (granted_by)"
+```
+
+**Key field notes:**
+- `user_credentials.credential_data`: for TOTP, contains `{"totp_secret_enc": "<base64-nonce+ciphertext>"}`. The TOTP secret is encrypted with AES-256-GCM using `LATARNIA_TOTP_ENC_KEY` from `secrets.env`. Nonce is prepended to ciphertext.
+- `sessions.token_hash`: cookie value is a random UUIDv4 never persisted; only its SHA-256 hash is stored.
+- `app_roles.role` enum: `none`, `webUI-low`, `webUI-med`, `webUI-full`, `full`. Default effective role when no row exists: `none`. `full` is the only role granting REST API access.
+- `machine_tokens`: JWT claims carry `sub` (user_id), `iat`, `exp`, `apps` (copy of `app_scope`), `super` (bool). Revocation check is a DB lookup on every API call. `revoked_at` is set on individual revocation, on user deactivation (`deactivate_user`), and on re-issue (`reissue_setup_token`); reactivation does NOT clear it.
+- `app_roles.granted_by` and `machine_tokens.granted_by`: `ON DELETE SET NULL` (migration 006) — rows survive the deletion of the granting Superuser with `granted_by = NULL`.
+
 ### Postgres Per-App Database Schema
 
 Each app with `database: true` receives its own Postgres database (`{database_prefix}{app_name}`, e.g. `tst_latarnia_crm`) and role (`{role_prefix}{app_name}_role`). The platform creates the following tracking table in every provisioned database.
@@ -462,6 +535,7 @@ There is no automatic backup loop today. App registry and port allocations are i
 | Source | Notes |
 |---|---|
 | **Per-env `data/{app_id}/`** | App-managed persistent state (manifest sets `data_dir: true`). Single rsync target per env. |
+| **`latarnia_platform_{env}`** | Platform auth DB (users, sessions, app_roles, machine_tokens, user_credentials). Owned by the platform; not app-specific. `pg_dump latarnia_platform_{env}`. |
 | **Postgres per-app DBs** | Provisioned by `db_provisioner.py`; one DB per app that declares `database: true`. `pg_dump` per DB; the registry knows the DB names. |
 | **Redis** | RDB / AOF as configured on the host. The platform doesn't manage Redis lifecycle. |
 | **`/etc/systemd/system/latarnia-{env}.service`** | Bootstrap artefact, installed manually per host. Not env-data. |

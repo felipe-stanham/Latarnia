@@ -1,184 +1,41 @@
 ---
 name: deployment-process
-description: Deployment procedure for this project. Contains the step-by-step process, target-specific notes, and a log of procedural changes over time.
+description: Deployment procedure for this project. Reads targets from docs/local/deployment.md (gitignored) and secrets from .deploy-secrets (gitignored). Logs deployments to DEPLOYMENTS.md. Invoke when deploying to a target.
 ---
 
 # Rules
 
-- Before any deployment, read `.deploy-secrets` and verify the target exists.
+- **This skill itself is committed** — it documents the *process*. The host-specific details it consults are not.
+- Before any deployment:
+  1. Read `docs/local/deployment.md` and confirm the requested target exists. If the file is missing, stop and ask the user to provide it (use template at `docs/templates/deployment.template.md` if present).
+  2. Read `.deploy-secrets` and confirm credentials exist for that target+environment. If missing, stop and ask the user to provide them (use template at `docs/templates/deploy-secrets.template.md`).
 - **Never deploy to a `prd` target without explicit user confirmation.**
-- Warn me if regression tests have not been run before deploying to PRD (see Testing section).
+- Warn if regression tests have not been run before deploying to `prd` (delegate to the `tester` agent — see project Testing rules).
 - Deploy to `tst` targets from the `tst` branch; deploy to `prd` targets from `main` only.
-- Log every deployment action: target, environment, timestamp, commit hash in `DEPLOYMENTS.md`.
-- If `.deploy-secrets` does not exist or is missing a target, stop and ask the user to provide the credentials.
-- If adding a new deploy target, use template at `docs/templates/deploy-secrets.template`.
+- Verify the current branch matches the target environment before proceeding. If it does not, stop and refuse.
+- Log every deployment action — target, environment, timestamp, commit hash, deployer — in `DEPLOYMENTS.md`.
+- If adding a new deploy target, add it to `docs/local/deployment.md` (procedural notes) AND `.deploy-secrets` (credentials). Both files are gitignored.
 
+# Where Things Live
+
+- `docs/local/deployment.md` — gitignored. The list of targets, environments each target serves, restart sequences, host-specific quirks, and any procedural notes that vary per project.
+- `.deploy-secrets` — gitignored. Per-target credentials (SSH hosts, keys, ports, paths). One section per `target.environment` combination.
+- This skill (`SKILL.md`) — committed. Process rules and the deployment procedure outline below.
+- `DEPLOYMENTS.md` at the repo root — committed. The deployment log.
 
 # Procedure
-1. Run regression tests (`TESTS.md`) — all must pass
-2. Read `.deploy-secrets` for the target
-3. SSH to the target, `git pull` the correct branch
-4. **DEV/TST only:** Copy example apps to `apps/`:
-   ```
-   cp -r examples/example_full_app apps/
-   cp -r examples/example_companion apps/
-   ```
-   PRD does **not** deploy example apps — only real apps live in PRD `apps/`.
-5. Restart the service. The main platform runs as environment-scoped **system** systemd units on the Pi:
-   - TST: `sudo systemctl restart latarnia-tst.service`
-   - PRD: `sudo systemctl restart latarnia-prd.service`
 
-   Verify with `systemctl list-units --type=service --all | grep -i latarnia` (no `--user`).
+The concrete steps depend on the target and live in `docs/local/deployment.md`. The general shape is:
 
-   > **Per-app services are env-scoped** (P-0004). `ServiceManager` reads `ENV` and generates unit names like `latarnia-tst-{app}.service` / `latarnia-prd-{app}.service` so TST and PRD apps don't collide in `~/.config/systemd/user/`. Ensure the relevant `ENV` value is set in the platform's environment (systemd unit `Environment=ENV=tst` for `latarnia-tst.service`, `ENV=prd` for `latarnia-prd.service`).
-6. Run smoke tests against the deployed instance
-7. Log the deployment in `DEPLOYMENTS.md`
+1. Confirm target, environment, and current branch are consistent.
+2. Run regression tests (`tester` agent) if deploying to `tst` or `prd`.
+3. Pull the target's host, path, and credentials from `.deploy-secrets`.
+4. Follow the target-specific procedure documented in `docs/local/deployment.md`.
+5. Verify the deployed service is healthy (smoke test specified in `docs/local/deployment.md`).
+6. **Last step:** Append an entry to `DEPLOYMENTS.md` with target, environment, timestamp, commit hash, and outcome.
 
-# Service Names (reference)
+# After Incidents or Procedural Changes
 
-| Component              | Unit name                                   | Scope           | Restart command                                       |
-|------------------------|---------------------------------------------|-----------------|-------------------------------------------------------|
-| Main platform (TST)    | `latarnia-tst.service`                      | system          | `sudo systemctl restart latarnia-tst.service`         |
-| Main platform (PRD)    | `latarnia-prd.service`                      | system          | `sudo systemctl restart latarnia-prd.service`         |
-| Per-app (TST)          | `latarnia-tst-{app_name}.service`           | user (`--user`) | `systemctl --user restart latarnia-tst-{app}.service` |
-| Per-app (PRD)          | `latarnia-prd-{app_name}.service`           | user (`--user`) | `systemctl --user restart latarnia-prd-{app}.service` |
-
-# First-Time Bootstrap (fresh Pi)
-
-Use this once per host when bringing up a new homeserver or re-creating the main-platform systemd units. The two main-platform units (`latarnia-tst.service`, `latarnia-prd.service`) are **system-scope** units installed under `/etc/systemd/system/` and run by the `felipe` user, each pointing at its own `DEPLOY_PATH` and `PORT` from `.deploy-secrets`.
-
-## 1. Prerequisites on the Pi
-- OS: Raspberry Pi OS (Debian-based)
-- Packages: `git`, `python3`, `python3-venv`, `redis-server`, `postgresql`
-- Postgres extensions (one OS package per platform-default extension; see `db_provisioner.py::DEFAULT_EXTENSIONS`):
-  - `postgresql-17-pgvector` — pgvector for vector similarity search
-  - Install with: `sudo apt install postgresql-17-pgvector` (replace `17` with your installed Postgres major version)
-- Base dirs created as root:
-  ```
-  sudo mkdir -p /opt/latarnia/tst /opt/latarnia/prd
-  sudo chown -R felipe:felipe /opt/latarnia
-  ```
-
-## 2. Clone the repo into each env dir
-As the `felipe` user:
-```
-git clone <repo-url> /opt/latarnia/tst && cd /opt/latarnia/tst && git checkout tst
-git clone <repo-url> /opt/latarnia/prd && cd /opt/latarnia/prd && git checkout main
-```
-Create a venv and install deps in each:
-```
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-```
-
-## 3. Install the main-platform unit files
-
-These are the authoritative unit files running on the homeserver (HERMES, `192.168.68.100`). Install each as root under `/etc/systemd/system/`.
-
-`/etc/systemd/system/latarnia-tst.service`:
-```ini
-[Unit]
-Description=Latarnia TST Environment
-After=network.target redis-server.service postgresql.service
-Wants=redis-server.service postgresql.service
-
-[Service]
-Type=simple
-User=felipe
-Group=felipe
-WorkingDirectory=/opt/latarnia/tst
-ExecStart=/opt/latarnia/tst/.venv/bin/python -m uvicorn latarnia.main:app --host 0.0.0.0 --port 8000 --app-dir src
-Restart=on-failure
-RestartSec=5
-Environment=ENV=tst
-Environment=XDG_RUNTIME_DIR=/run/user/1000
-
-[Install]
-WantedBy=multi-user.target
-```
-
-`/etc/systemd/system/latarnia-prd.service`:
-```ini
-[Unit]
-Description=Latarnia PRD Environment
-After=network.target redis-server.service postgresql.service
-Wants=redis-server.service postgresql.service
-
-[Service]
-Type=simple
-User=felipe
-Group=felipe
-WorkingDirectory=/opt/latarnia/prd
-ExecStart=/opt/latarnia/prd/.venv/bin/python -m uvicorn latarnia.main:app --host 0.0.0.0 --port 8080 --app-dir src
-Restart=on-failure
-RestartSec=5
-Environment=ENV=prd
-Environment=XDG_RUNTIME_DIR=/run/user/1000
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Notes:
-- TST listens on `:8000`, PRD on `:8080` (matches `.deploy-secrets`).
-- `--app-dir src` matches the repo layout (`src/latarnia/`).
-- `Environment=ENV=...` is what `ServiceManager` reads to env-scope per-app unit names (see P-0004). Keep it in sync with `DEPLOY_PATH`.
-- `Environment=XDG_RUNTIME_DIR=/run/user/1000` (felipe's UID) is required so the system-scope main platform can talk to felipe's user-scope systemd manager when launching per-app units (P-0005). Without it, `/api/apps/{id}/process/start` fails with `Failed to connect to user scope bus via local transport`. Confirm felipe's UID with `id -u felipe`; the value is stable per host.
-
-## 4. Enable user-mode linger for `felipe`
-
-Per-app services are user-scope systemd units (see P-0005). They only start at boot — and survive logout — when linger is enabled for the user that owns them. Without this, `latarnia-{env}-{app}.service` units silently fail to come up on platform restart.
-
-```
-sudo loginctl enable-linger felipe
-loginctl show-user felipe --property=Linger   # → Linger=yes
-```
-
-The platform logs a `WARNING` at startup if linger is disabled.
-
-## 5. Create the per-env secrets master files (P-0006)
-
-Apps that declare `config.requires_secrets` in their manifest will refuse to start unless the named keys are present in the env's master secrets file. Create empty files now (or populate with the keys your apps need); the operator can edit them later with `$EDITOR`.
-
-```
-sudo -u felipe touch /opt/latarnia/tst/secrets.env
-sudo -u felipe touch /opt/latarnia/prd/secrets.env
-sudo chmod 600 /opt/latarnia/{tst,prd}/secrets.env
-sudo chown felipe:felipe /opt/latarnia/{tst,prd}/secrets.env
-```
-
-File format (per env):
-```
-# /opt/latarnia/tst/secrets.env
-VOYAGE_API_KEY=pa-xxxxx
-ANTHROPIC_API_KEY=sk-ant-xxxxx
-# Wrap values in single quotes if they contain $, =, or spaces:
-GITHUB_TOKEN='ghp_xx with literal $ and spaces'
-```
-
-Rules:
-- One `KEY=value` per line. **Single-line values only.** Use `\n` escapes if you absolutely need a newline (rare for API keys).
-- `# comments` and blank lines are tolerated.
-- Single-quoted values keep `$`/`=`/spaces literal (systemd otherwise expands `$VAR`).
-- File mode **must be 600 or stricter**. The platform refuses to read a wider-mode file and logs a warning.
-
-The platform reads this file on every app launch (no caching), so changes take effect on the next `start_service` / `restart_service` call. **Do NOT** restart the platform itself to pick up rotated secrets — restart only the consuming apps.
-
-The platform writes per-app filtered copies to `/opt/latarnia/{env}/secrets/{app_id}.env` automatically; do not edit those (they're regenerated on every launch).
-
-**Pre-P-0006 cleanup:** if any operator workaround `~felipe/.config/systemd/user/latarnia-{env}-{app}.service.d/secrets.conf` files exist (the manual drop-in pattern), delete them after the master file is populated — the platform now owns secret injection.
-
-## 6. Enable and start
-```
-sudo systemctl daemon-reload
-sudo systemctl enable --now latarnia-tst.service
-sudo systemctl enable --now latarnia-prd.service
-sudo systemctl status latarnia-tst.service latarnia-prd.service
-```
-
-## 7. Verify
-```
-systemctl list-units --type=service --all | grep -i latarnia
-curl http://localhost:8000/health   # TST
-curl http://localhost:8080/health   # PRD
-curl http://localhost:8000/api/secrets | jq    # P-0006: should list configured key names (no values)
-```
+If a deployment fails or the procedure needed adjustment, update **both**:
+- `docs/local/deployment.md` — the host-specific procedural notes.
+- This `SKILL.md` — only if the failure exposed a gap in the general rules (e.g., a missing safety check that should apply to every project).

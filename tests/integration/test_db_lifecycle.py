@@ -50,7 +50,8 @@ def pg_client(config_manager):
 
 
 @pytest.fixture
-def provisioner(config_manager, pg_client):
+def provisioner(config_manager, pg_client, tmp_path):
+    config_manager.config.process_manager.data_dir = str(tmp_path)
     return DbProvisioner(config_manager, pg_client)
 
 

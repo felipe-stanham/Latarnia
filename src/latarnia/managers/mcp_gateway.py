@@ -9,6 +9,7 @@ MCP client (SSE transport) to individual app MCP servers.
 
 import asyncio
 import logging
+from contextvars import ContextVar
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
@@ -20,6 +21,12 @@ from starlette.applications import Starlette
 from starlette.routing import Route, Mount
 
 logger = logging.getLogger("latarnia.mcp_gateway")
+
+# Per-connection JWT claims for the in-flight MCP SSE session. Set in handle_sse
+# before the MCP server runs; read by the tool list/call handlers so tools are
+# scoped to the token's apps and the per-app role header can be injected.
+# ContextVars propagate into the same-task handler dispatch.
+_request_claims: ContextVar[Optional[dict]] = ContextVar("mcp_request_claims", default=None)
 
 
 @dataclass
@@ -45,9 +52,14 @@ class MCPGateway:
     MCP-enabled apps and proxies tool calls to the appropriate app.
     """
 
-    def __init__(self, config_manager, app_manager):
+    def __init__(self, config_manager, app_manager, jwt_auth=None, token_store=None):
         self.config_manager = config_manager
         self.app_manager = app_manager
+        # P-0008: when set, the gateway requires a valid, non-revoked Bearer JWT
+        # to open an MCP session, scopes the tool list to the token's apps, and
+        # forwards X-Latarnia-App-Role to per-app MCP servers on tool calls.
+        self.jwt_auth = jwt_auth
+        self.token_store = token_store
 
         # Tool index: "app_name.tool_name" -> ToolIndexEntry
         self._tool_index: Dict[str, ToolIndexEntry] = {}
@@ -74,14 +86,25 @@ class MCPGateway:
         sse_transport = SseServerTransport("/messages/")
 
         async def handle_sse(scope, receive, send):
-            async with sse_transport.connect_sse(
-                scope, receive, send
-            ) as streams:
-                await self._mcp_server.run(
-                    streams[0],
-                    streams[1],
-                    self._mcp_server.create_initialization_options(),
-                )
+            claims_token = None
+            if self.jwt_auth is not None:
+                claims = self._authorize_scope(scope)
+                if claims is None:
+                    await self._send_401(send)
+                    return
+                claims_token = _request_claims.set(claims)
+            try:
+                async with sse_transport.connect_sse(
+                    scope, receive, send
+                ) as streams:
+                    await self._mcp_server.run(
+                        streams[0],
+                        streams[1],
+                        self._mcp_server.create_initialization_options(),
+                    )
+            finally:
+                if claims_token is not None:
+                    _request_claims.reset(claims_token)
 
         sse_route = Route("/sse", endpoint=lambda _: None)
         sse_route.app = handle_sse
@@ -208,10 +231,57 @@ class MCPGateway:
     # MCP server handlers
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Auth helpers (P-0008)
+    # ------------------------------------------------------------------
+
+    def _authorize_scope(self, scope) -> Optional[dict]:
+        """Validate the Bearer JWT on an incoming MCP SSE connection.
+
+        Returns claims for a valid, non-revoked token, else None (-> 401).
+        """
+        headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
+        auth = headers.get("authorization", "")
+        if not auth.startswith("Bearer "):
+            return None
+        token = auth[7:].strip()
+        claims = self.jwt_auth.validate(token)
+        if claims is None:
+            return None
+        if self.token_store is not None and \
+                not self.token_store.is_active(self.jwt_auth.token_hash(token)):
+            return None
+        return claims
+
+    @staticmethod
+    async def _send_401(send) -> None:
+        body = b'{"detail":"Authentication required"}'
+        await send({"type": "http.response.start", "status": 401, "headers": [
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(body)).encode()),
+        ]})
+        await send({"type": "http.response.body", "body": body})
+
+    @staticmethod
+    def _role_for_app(claims: Optional[dict], app_name: str) -> str:
+        if claims is None or claims.get("super"):
+            return "full"
+        return claims.get("apps", {}).get(app_name, "none")
+
+    @staticmethod
+    def _in_scope(claims: Optional[dict], app_name: str) -> bool:
+        """Whether the current connection may see/call tools for `app_name`."""
+        if claims is None or claims.get("super"):
+            return True
+        return claims.get("apps", {}).get(app_name, "none") != "none"
+
     def _handle_list_tools(self) -> list:
-        """Return all tools in the index as MCP tool dicts."""
+        """Return tools in the index, scoped to the connection's JWT claim."""
+        claims = _request_claims.get()
         tools = []
         for entry in self._tool_index.values():
+            if not self._in_scope(claims, entry.app_name):
+                continue
             tools.append(
                 mcp_types.Tool(
                     name=entry.tool_schema["name"],
@@ -240,6 +310,16 @@ class MCPGateway:
 
         entry = self._tool_index[name]
 
+        # Scope enforcement: a token not granted this app cannot call its tools.
+        claims = _request_claims.get()
+        if not self._in_scope(claims, entry.app_name):
+            return [
+                mcp_types.TextContent(
+                    type="text",
+                    text=f"Error: not authorized for app '{entry.app_name}'",
+                )
+            ]
+
         # Check app health via registry
         app = self.app_manager.registry.get_app(entry.app_id)
         if not app or not app.mcp_info or not app.mcp_info.healthy:
@@ -250,12 +330,18 @@ class MCPGateway:
                 )
             ]
 
+        # Forward the caller's role for this app to the per-app MCP server so it
+        # can apply role-aware behaviour (cap-016/021). Only when auth is active.
+        headers = None
+        if claims is not None:
+            headers = {"X-Latarnia-App-Role": self._role_for_app(claims, entry.app_name)}
+
         try:
             from mcp.client.sse import sse_client
             from mcp.client.session import ClientSession
 
             async with sse_client(
-                f"http://localhost:{entry.mcp_port}/sse"
+                f"http://localhost:{entry.mcp_port}/sse", headers=headers
             ) as (read_stream, write_stream):
                 async with ClientSession(read_stream, write_stream) as session:
                     await session.initialize()

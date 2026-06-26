@@ -1,19 +1,24 @@
 """
 Main FastAPI application for Latarnia
 """
+import asyncio
+import base64
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+import shutil
+
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse, RedirectResponse
 
 from latarnia.core.config import config_manager
 from latarnia.core.redis_client import RedisHealthMonitor
-from latarnia.core.event_subscriber import RedisEventSubscriber
+from latarnia.core.event_subscriber import AsyncStreamConsumer
 from latarnia.utils.system_monitor import SystemMonitor
-from latarnia.web.dashboard import router as dashboard_router
+from latarnia.web.dashboard import build_dashboard_router
 
 
 # Module-level logger so endpoint handlers can log errors. setup_logging()
@@ -60,24 +65,58 @@ async def lifespan(app: FastAPI):
             import subprocess
             import platform
             if platform.system() == "Darwin":  # macOS
-                subprocess.run(["brew", "services", "start", "redis"], 
+                subprocess.run(["brew", "services", "start", "redis"],
                              capture_output=True, check=False)
                 logger.info("Started Redis via brew services")
             else:  # Linux
-                subprocess.run(["sudo", "systemctl", "start", "redis"], 
+                subprocess.run(["sudo", "systemctl", "start", "redis"],
                              capture_output=True, check=False)
                 logger.info("Started Redis via systemctl")
         except Exception as e:
             logger.error(f"Failed to auto-start Redis: {e}")
     else:
         logger.info("Redis is already running")
-    
+
+    # Re-check Redis after potential auto-start attempt
+    redis_status = redis_monitor.get_redis_metrics()
+    redis_ok = redis_status.get("status") == "connected"
+    if not redis_ok:
+        logger.warning("Redis is not reachable — app auto-start will be skipped")
+
     # Check Postgres connectivity
     logger.info("Checking Postgres connectivity...")
-    if pg_client.check_connectivity():
+    pg_ok = pg_client.check_connectivity()
+    if pg_ok:
         logger.info("Postgres is reachable")
     else:
-        logger.warning("Postgres is not reachable — apps with database:true will fail to provision")
+        logger.warning("Postgres is not reachable — app auto-start will be skipped")
+
+    # Initialize the platform auth DB (create + migrate). Requires Postgres.
+    if pg_ok:
+        logger.info("Initializing platform auth DB (%s)...", auth_db.db_name)
+        if auth_db.initialize():
+            logger.info("Platform auth DB ready")
+        else:
+            logger.error("Auth DB init failed — auth endpoints will be unavailable")
+    else:
+        logger.warning("Skipping auth DB init — Postgres unreachable")
+
+    # Fail loud-but-soft if the TOTP encryption key is absent: TOTP setup and
+    # login can't work without it. Logged once at startup with a clear fix.
+    try:
+        _totp_key_loader()
+    except Exception:
+        logger.error(
+            "LATARNIA_TOTP_ENC_KEY is missing or invalid — TOTP setup/login "
+            "will fail. Add a 32-byte base64 key to secrets.env (mode 600)."
+        )
+    try:
+        _jwt_secret_loader()
+    except Exception:
+        logger.error(
+            "LATARNIA_JWT_SECRET is missing — machine-token issuance/validation "
+            "will fail. Add it to secrets.env (mode 600)."
+        )
 
     # Linger check: per-app user units only survive logout when linger is on.
     # Warn loudly but do not block startup — the main platform itself runs as
@@ -99,6 +138,11 @@ async def lifespan(app: FastAPI):
     discovered_count = app_manager.discover_apps()
     logger.info(f"Discovered {discovered_count} applications")
 
+    # Clean up apps whose folders were deleted since last run
+    orphan_count = await _cleanup_orphaned_apps()
+    if orphan_count:
+        logger.info("Cleaned up %d orphaned app(s) on startup", orphan_count)
+
     # Reconcile the registry with surviving per-app systemd units (Linux
     # only). Per-app units have independent lifetimes, so they typically
     # survive a platform restart. Without this step the dashboard shows
@@ -111,6 +155,8 @@ async def lifespan(app: FastAPI):
     # per-app (OS, type) by pick_launcher: Linux+service → systemd, Darwin →
     # subprocess fallback. Apps already RUNNING (reconciled above) are
     # skipped — their unit/process is already up.
+    # Per-app infra guard: skip apps whose declared service requirements
+    # (redis_required, database) cannot be satisfied right now.
     logger.info("Auto-starting service apps...")
     auto_start_count = 0
     for app_entry in app_manager.registry.get_all_apps():
@@ -118,6 +164,18 @@ async def lifespan(app: FastAPI):
             continue
         if app_entry.status == AppStatus.RUNNING:
             logger.info(f"Skipping auto-start of {app_entry.name}: already running (reconciled)")
+            continue
+        if not redis_ok and app_entry.manifest.config.redis_required:
+            logger.warning(
+                "Skipping auto-start of %s: Redis not reachable and app declares redis_required",
+                app_entry.name,
+            )
+            continue
+        if not pg_ok and app_entry.manifest.config.database:
+            logger.warning(
+                "Skipping auto-start of %s: Postgres not reachable and app declares database",
+                app_entry.name,
+            )
             continue
         logger.info(f"Auto-starting service app: {app_entry.name} ({app_entry.app_id})")
         launcher = pick_launcher(app_entry)
@@ -145,9 +203,23 @@ async def lifespan(app: FastAPI):
             ):
                 await mcp_gateway.on_app_started(app_entry.app_id)
 
-    # Start Redis event subscriber
-    logger.info("Starting Redis event subscriber...")
-    event_subscriber.start()
+    # Generate the Caddyfile from current registry state and reload Caddy.
+    # Runs after auto-start so running apps already have assigned ports and
+    # get webUI route blocks. A reload failure (e.g. Caddy not installed in
+    # local dev) is logged but does not block platform startup.
+    logger.info("Generating Caddy configuration...")
+    try:
+        caddy_manager.generate_config()
+        if caddy_manager.reload():
+            logger.info("Caddy configuration loaded")
+        else:
+            logger.warning("Caddy reload did not succeed (see logs above)")
+    except Exception as exc:
+        logger.error("Caddy config generation failed: %s", exc)
+
+    # Start Redis stream consumer
+    logger.info("Starting Redis stream consumer...")
+    await event_subscriber.start()
 
     # Start health monitoring. The dashboard's combined `overall_status`
     # (P-0005 cap-005) needs this loop running to refresh /health results.
@@ -164,23 +236,21 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down Latarnia main application")
     logger.info("Stopping health monitor...")
     await health_monitor.stop_monitoring()
-    logger.info("Stopping Redis event subscriber...")
-    event_subscriber.stop()
+    logger.info("Stopping Redis stream consumer...")
+    await event_subscriber.stop()
     logger.info("Stopping all managed service apps...")
     subprocess_launcher.stop_all()
     logger.info("Stopping all Streamlit apps...")
     streamlit_manager.stop_all()
-    logger.info("Closing web proxy HTTP client...")
-    await web_proxy_module.shutdown()
     logger.info("Shutdown complete")
 
 
 # Initialize components at module level for testing
 system_monitor = SystemMonitor()
 redis_monitor = RedisHealthMonitor(config_manager.get_redis_url())
-event_subscriber = RedisEventSubscriber(
-    config_manager.get_redis_url(), 
-    max_events=config_manager.config.event_subscriber.max_events
+event_subscriber = AsyncStreamConsumer(
+    config_manager.get_redis_url(),
+    max_events=config_manager.config.event_subscriber.max_events,
 )
 
 # Initialize app management components
@@ -235,10 +305,104 @@ if config_manager.config.mcp.enabled:
     mcp_gateway = MCPGateway(config_manager, app_manager)
     app_manager.mcp_gateway = mcp_gateway
 
-# Initialize web UI proxy
-from .web.web_proxy import router as web_proxy_router
-from .web import web_proxy as web_proxy_module
-web_proxy_module.app_manager = app_manager
+# Initialize Caddy config manager (P-0008). Caddy is now the single ingress
+# and reverse proxy; the old Python web_proxy has been removed. The manager
+# regenerates the per-env Caddyfile from registry state on app lifecycle
+# events and asks Caddy to reload.
+from .caddy import CaddyConfigManager
+
+caddy_manager = CaddyConfigManager(config_manager, app_manager)
+app_manager.caddy_manager = caddy_manager
+
+# Initialize auth foundation (P-0008 Scope 2). Platform auth state lives in
+# `latarnia_platform_{env}`; the DB is created + migrated at startup.
+from .auth import AuthDB
+from .auth.users import UserStore
+from .auth.sessions import SessionStore
+from .auth.roles import RoleStore
+from .auth.providers import TOTPAuthProvider
+from .auth.jwt_auth import JWTAuth
+from .auth.tokens import MachineTokenStore
+from .auth.middleware import JWTAuthMiddleware
+from .auth.routes import build_auth_router, resolve_session_user, require_superuser
+
+
+def _load_platform_secret(name: str) -> Optional[str]:
+    """Read a platform-wide secret from the env, then the master secrets file.
+
+    These (LATARNIA_TOTP_ENC_KEY, LATARNIA_JWT_SECRET) are platform-level, not
+    per-app, so they are read directly from the master file rather than via the
+    per-app filtered view. Never logged.
+    """
+    val = os.environ.get(name)
+    if not val:
+        val = secret_manager.load().get(name)
+    return val
+
+
+def _totp_key_loader() -> bytes:
+    raw = _load_platform_secret("LATARNIA_TOTP_ENC_KEY")
+    if not raw:
+        raise ValueError(
+            "LATARNIA_TOTP_ENC_KEY is not set (add it to secrets.env, mode 600)"
+        )
+    return base64.b64decode(raw)
+
+
+def _jwt_secret_loader() -> str:
+    raw = _load_platform_secret("LATARNIA_JWT_SECRET")
+    if not raw:
+        raise ValueError(
+            "LATARNIA_JWT_SECRET is not set (add it to secrets.env, mode 600)"
+        )
+    return raw
+
+
+auth_db = AuthDB(config_manager, pg_client)
+user_store = UserStore(auth_db)
+session_store = SessionStore(auth_db, config_manager)
+role_store = RoleStore(auth_db, user_store)
+totp_provider = TOTPAuthProvider(
+    auth_db, _totp_key_loader, issuer=config_manager.config.auth.totp_issuer
+)
+jwt_auth = JWTAuth(_jwt_secret_loader)
+token_store = MachineTokenStore(auth_db, jwt_auth)
+# Enforce JWT on the MCP gateway (cap-021): Bearer required, tool list scoped,
+# X-Latarnia-App-Role forwarded to per-app MCP servers.
+if mcp_gateway is not None:
+    mcp_gateway.jwt_auth = jwt_auth
+    mcp_gateway.token_store = token_store
+auth_router = build_auth_router(
+    auth_db, user_store, session_store, totp_provider, config_manager,
+    role_store=role_store, app_manager=app_manager,
+    jwt_auth=jwt_auth, token_store=token_store,
+)
+
+
+def _session_user(request):
+    """Resolve the browser session's user (cookie-only), or None.
+
+    Delegates to the auth module's single resolver so dashboard data scoping
+    (e.g. /api/apps) and the auth router never diverge. Behind Caddy the
+    session cookie is forwarded, so this works there too.
+    """
+    return resolve_session_user(
+        request, session_store, user_store, config_manager.config.auth.cookie_name
+    )
+
+
+def _require_superuser(request):
+    """Assert the current principal is a Superuser; raise 403 otherwise.
+
+    Handles both Bearer JWT (request.state.jwt_claims) and session cookie
+    principals. Used for platform-level actions (restart, platform logs).
+    """
+    return require_superuser(
+        request,
+        session_store=session_store,
+        user_store=user_store,
+        cookie_name=config_manager.config.auth.cookie_name,
+    )
 
 
 # Create FastAPI app
@@ -249,17 +413,57 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Include web dashboard routes
-app.include_router(dashboard_router)
+# Auth gate for /api/* (P-0008 Scope 4): require a valid Bearer JWT or session
+# cookie. Pure-ASGI so /auth/*, /mcp (SSE) and websockets pass through
+# untouched. MCP auth is enforced inside the gateway.
+app.add_middleware(
+    JWTAuthMiddleware,
+    jwt_auth=jwt_auth,
+    token_store=token_store,
+    session_store=session_store,
+    cookie_name=config_manager.config.auth.cookie_name,
+)
 
-# Include web UI proxy routes (catch-all, must be after specific routes)
-app.include_router(web_proxy_router)
+# Include auth routes (/auth/* and /api/auth/*) — /auth/* must be reachable
+# without a session (Caddy routes /auth/* publicly; verify is the forward_auth
+# target). /api/auth/* is gated by the middleware above.
+app.include_router(auth_router)
+
+# Include web dashboard routes — built after auth components are wired so
+# _session_user is available to inject is_superuser into the template context.
+app.include_router(build_dashboard_router(session_resolver=_session_user))
+
+
+async def _cleanup_orphaned_apps() -> int:
+    """Stop, remove units, and unregister apps whose app folder has been deleted."""
+    orphans = app_manager.get_orphaned_apps()
+    count = 0
+    for app_entry in orphans:
+        logger.warning(
+            "Orphaned app detected: %s (path %s missing) — cleaning up",
+            app_entry.app_id, app_entry.path,
+        )
+        try:
+            if app_entry.type == AppType.SERVICE:
+                pick_launcher(app_entry).stop_service(app_entry.app_id)
+            else:
+                streamlit_manager.stop_streamlit_app(app_entry.app_id)
+        except Exception as exc:
+            logger.warning("Could not stop orphaned app %s: %s", app_entry.app_id, exc)
+        service_manager.remove_service(app_entry.app_id)
+        if app_entry.runtime_info.assigned_port:
+            port_manager.release_port(app_entry.app_id)
+        if app_entry.mcp_info and app_entry.mcp_info.mcp_port:
+            port_manager.release_mcp_port(app_entry.app_id)
+        app_manager.unregister_app(app_entry.app_id)
+        count += 1
+        logger.info("Cleaned up orphaned app: %s", app_entry.app_id)
+    return count
 
 
 @app.get("/")
 async def root():
-    """Root endpoint"""
-    return {"message": "Latarnia is running", "version": "0.1.0"}
+    return RedirectResponse("/dashboard", status_code=302)
 
 
 @app.get("/health")
@@ -271,11 +475,12 @@ async def health_check():
         # Get system metrics
         hardware_metrics = system_monitor.get_hardware_metrics()
         redis_metrics = redis_monitor.get_redis_metrics()
-        
+        pg_metrics = pg_client.get_postgres_metrics()
+
         # Determine overall health
         health_status = "good"
         issues = []
-        
+
         # Check hardware thresholds
         if "error" in hardware_metrics:
             health_status = "error"
@@ -284,7 +489,7 @@ async def health_check():
             cpu_usage = hardware_metrics.get("cpu", {}).get("usage_percent", 0)
             memory_usage = hardware_metrics.get("memory", {}).get("percent", 0)
             disk_usage = hardware_metrics.get("disk", {}).get("percent", 0)
-            
+
             if cpu_usage > 80:
                 health_status = "warning"
                 issues.append(f"High CPU usage: {cpu_usage}%")
@@ -294,18 +499,24 @@ async def health_check():
             if disk_usage > 90:
                 health_status = "warning"
                 issues.append(f"High disk usage: {disk_usage}%")
-        
+
         # Check Redis connection
         if redis_metrics.get("status") != "connected":
             health_status = "error"
             issues.append("Redis connection failed")
-        
+
+        # Check Postgres connection
+        if pg_metrics.get("status") != "connected":
+            health_status = "error"
+            issues.append("Postgres connection failed")
+
         return {
             "health": health_status,
             "message": "System operational" if not issues else "; ".join(issues),
             "extra_info": {
                 "hardware": hardware_metrics,
                 "redis": redis_metrics,
+                "postgres": pg_metrics,
                 "config_loaded": config is not None,
                 "data_dir_exists": config_manager.get_data_dir().exists(),
                 "logs_dir_exists": config_manager.get_logs_dir().exists()
@@ -337,6 +548,15 @@ async def get_redis_metrics():
     """Get Redis metrics and status"""
     try:
         return redis_monitor.get_redis_metrics()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/system/postgres")
+async def get_postgres_metrics():
+    """Get Postgres connectivity status"""
+    try:
+        return pg_client.get_postgres_metrics()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -382,24 +602,53 @@ async def get_config():
 
 @app.post("/api/apps/discover")
 async def discover_apps():
-    """Discover applications in the apps directory"""
+    """Discover new applications and clean up orphaned ones."""
     try:
         count = app_manager.discover_apps()
+        orphan_count = await _cleanup_orphaned_apps()
+        # Regenerate unconditionally: a manual discovery may have picked up an
+        # externally-started app whose port wasn't reflected in the Caddyfile.
+        await asyncio.to_thread(caddy_manager.on_app_registered)
         return {
             "discovered_count": count,
-            "message": f"Discovered {count} new applications"
+            "orphans_cleaned": orphan_count,
+            "message": f"Discovered {count} new application(s), cleaned {orphan_count} orphaned app(s)",
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/apps")
-async def get_all_apps():
-    """Get all registered applications with combined systemd+/health status."""
+async def get_all_apps(request: Request):
+    """Get registered apps with combined systemd+/health status.
+
+    Role-scoped (P-0008 cap-015): when a browser session is present, a
+    non-superuser only sees apps where their role for that app is not `none`,
+    so dashboard tiles are filtered server-side before the client renders them.
+    Superusers (and, in dev, unauthenticated direct access) see all apps.
+    Machine-token (JWT) scoping is layered on in Scope 4.
+
+    Security invariant: the `user=None` (unauthenticated) branch returns all
+    apps. This is safe only because in prod ufw blocks port 8000 and Caddy's
+    forward_auth guarantees an authenticated session reaches this endpoint;
+    direct unauthenticated access is a dev-only convenience.
+    """
     try:
+        claims = getattr(request.state, "jwt_claims", None)
+        user = _session_user(request)
+        # The middleware already gated this route; if neither identity resolves
+        # now (e.g. session revoked in the TOCTOU window), fail closed.
+        if claims is None and user is None:
+            raise HTTPException(status_code=401, detail="Authentication required")
         apps = app_manager.registry.get_all_apps()
         payload = []
         for app_entry in apps:
+            if claims is not None and not claims.get("super"):
+                # Machine token: scoped to the apps named in its JWT claim.
+                if claims.get("apps", {}).get(app_entry.name, "none") == "none":
+                    continue
+            elif not role_store.is_visible(user, app_entry.name):
+                continue
             entry = app_entry.to_dict()
             combined = health_monitor.get_overall_status(app_entry.app_id)
             entry["overall_status"] = combined["overall_status"]
@@ -414,13 +663,30 @@ async def get_all_apps():
 
 
 @app.get("/api/apps/{app_id}")
-async def get_app(app_id: str):
-    """Get a specific application by ID"""
+async def get_app(app_id: str, request: Request):
+    """Get a specific application by ID (role/scope enforced).
+
+    A machine token scoped to other apps (cap-020) gets 403; a non-superuser
+    session with role `none` for the app likewise gets 403.
+    """
     try:
         app = app_manager.registry.get_app(app_id)
         if not app:
             raise HTTPException(status_code=404, detail=f"App {app_id} not found")
-        
+
+        claims = getattr(request.state, "jwt_claims", None)
+        if claims is not None and not claims.get("super"):
+            if claims.get("apps", {}).get(app.name, "none") == "none":
+                raise HTTPException(status_code=403, detail="Token not scoped to this app")
+        else:
+            user = _session_user(request)
+            if user is None:
+                # Session vanished after the middleware gate — fail closed.
+                raise HTTPException(status_code=401, detail="Authentication required")
+            if not user["is_superuser"] and \
+                    role_store.get_role(user["id"], app.name) == "none":
+                raise HTTPException(status_code=403, detail="No access to this app")
+
         return app.to_dict()
     except HTTPException:
         raise
@@ -502,25 +768,62 @@ async def prepare_app(app_id: str):
 
 
 @app.delete("/api/apps/{app_id}")
-async def unregister_app(app_id: str):
-    """Unregister an application"""
+async def delete_app(app_id: str, delete_folder: bool = False):
+    """Stop, remove systemd unit, release ports, unregister, and optionally delete folder.
+
+    Query params:
+      delete_folder: if true, deletes the app's folder from the apps/ directory.
+                     The data directory and Postgres database are NOT touched.
+    """
     try:
         app = app_manager.registry.get_app(app_id)
         if not app:
             raise HTTPException(status_code=404, detail=f"App {app_id} not found")
-        
-        # Release port if allocated
+
+        app_path = app.path  # capture before unregistering
+
+        # Stop service; tolerate errors (app may already be stopped)
+        try:
+            if app.type == AppType.SERVICE:
+                pick_launcher(app).stop_service(app_id)
+            else:
+                streamlit_manager.stop_streamlit_app(app_id)
+        except Exception as exc:
+            logger.warning("Could not stop app %s during delete: %s", app_id, exc)
+
+        # Remove systemd unit (stop + disable + unlink unit file)
+        service_manager.remove_service(app_id)
+
+        # Release ports
         if app.runtime_info.assigned_port:
             port_manager.release_port(app_id)
+        if app.mcp_info and app.mcp_info.mcp_port:
+            port_manager.release_mcp_port(app_id)
 
-        success = app_manager.unregister_app(app_id)
-        if success:
-            return {
-                "success": True,
-                "message": f"App {app_id} unregistered successfully"
-            }
-        else:
+        # Unregister (also cleans up Redis stream consumer groups)
+        if not app_manager.unregister_app(app_id):
             raise HTTPException(status_code=500, detail=f"Failed to unregister app {app_id}")
+
+        # Optionally delete the app folder; log a warning if it fails — the app
+        # is already fully unregistered at this point so the delete is best-effort.
+        folder_deleted = False
+        if delete_folder and app_path.exists():
+            try:
+                shutil.rmtree(app_path)
+                folder_deleted = True
+                logger.info("Deleted app folder: %s", app_path)
+            except OSError as exc:
+                logger.warning("Could not delete app folder %s: %s", app_path, exc)
+
+        # App is gone from the registry — regenerate Caddy routes (drops its
+        # webUI/swagger blocks so they 404).
+        await asyncio.to_thread(caddy_manager.on_app_deregistered, app_id)
+
+        return {
+            "success": True,
+            "message": f"App {app_id} deleted successfully",
+            "folder_deleted": folder_deleted,
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -608,6 +911,7 @@ async def start_service(app_id: str):
                     detail=f"MCP backward compatibility violation for app {app_id}. "
                     "Previously registered tools were removed. App stopped.",
                 )
+            await asyncio.to_thread(caddy_manager.on_app_registered, app_id)
             return {"success": True, "message": f"Service started for app {app_id}"}
         else:
             raise HTTPException(status_code=400, detail=f"Failed to start service for app {app_id}")
@@ -626,6 +930,7 @@ async def stop_service(app_id: str):
         if success:
             if mcp_gateway:
                 await mcp_gateway.on_app_stopped(app_id)
+            await asyncio.to_thread(caddy_manager.on_app_deregistered, app_id)
             return {"success": True, "message": f"Service stopped for app {app_id}"}
         else:
             raise HTTPException(status_code=400, detail=f"Failed to stop service for app {app_id}")
@@ -650,6 +955,7 @@ async def restart_service(app_id: str):
                     detail=f"MCP backward compatibility violation for app {app_id}. "
                     "Previously registered tools were removed. App stopped.",
                 )
+            await asyncio.to_thread(caddy_manager.on_app_registered, app_id)
             return {"success": True, "message": f"Service restarted for app {app_id}"}
         else:
             raise HTTPException(status_code=400, detail=f"Failed to restart service for app {app_id}")
@@ -747,8 +1053,9 @@ async def get_app_logs(app_id: str, lines: int = 100):
 
 
 @app.get("/api/logs/latarnia")
-async def get_latarnia_logs(lines: int = 100):
-    """Get recent Latarnia main application logs"""
+async def get_latarnia_logs(request: Request, lines: int = 100):
+    """Get recent Latarnia main application logs (Superuser only)."""
+    _require_superuser(request)
     try:
         from pathlib import Path
         
@@ -777,67 +1084,127 @@ async def get_latarnia_logs(lines: int = 100):
 
 
 @app.get("/api/activity/recent")
-async def get_recent_activity(limit: int = 10):
-    """Get recent Redis pub/sub events"""
+async def get_recent_activity(request: Request, limit: int = 10):
+    """Get recent Redis stream events, filtered by the caller's role.
+
+    Superuser: all events returned unchanged.
+    Non-Superuser: default-deny — an event is kept only if its `source` equals
+    a registered App name and the caller holds the `full` role for that app.
+    Unresolvable sources (system events, raw stream names, unknown strings) are
+    always dropped for non-Superusers.
+    """
     try:
         import redis
         import json
         from datetime import datetime
-        
-        # Connect to Redis
+
+        # Resolve current principal (Bearer or session).
+        user = _session_user(request)
+        jwt_claims = getattr(getattr(request, "state", None), "jwt_claims", None)
+        is_super = (
+            (jwt_claims is not None and jwt_claims.get("super", False))
+            or (user is not None and user["is_superuser"])
+        )
+
+        # Build the set of app names visible to this principal (for fast lookup).
+        if not is_super:
+            app_names = {
+                app.name for app in app_manager.registry.get_all_apps()
+            }
+
         redis_client = redis.from_url(config_manager.get_redis_url())
-        
         activities = []
-        
-        # Get events from the recent events list (stored by background subscriber)
         events_key = "latarnia:events:recent"
-        
-        # Get the latest events
         total_events = redis_client.llen(events_key)
-        
+
         if total_events > 0:
-            # Get the last N events (newest at the end of the list)
             start_index = max(0, total_events - limit)
             events = redis_client.lrange(events_key, start_index, -1)
-            
-            # Reverse to show newest first
             events.reverse()
-            
+
             for event in events:
                 try:
                     event_data = json.loads(event)
-                    
-                    # Format timestamp
-                    timestamp_val = event_data.get('timestamp', '')
+
+                    if not is_super:
+                        source = event_data.get("source", "")
+                        # Default-deny: drop if source is not a registered app name.
+                        if source not in app_names:
+                            continue
+                        # Drop if the caller doesn't hold the 'full' role for that app.
+                        caller_id = user["id"] if user else None
+                        if caller_id is None:
+                            continue
+                        if role_store.get_role(caller_id, source) != "full":
+                            continue
+
+                    timestamp_val = event_data.get("timestamp", "")
                     if isinstance(timestamp_val, (int, float)):
-                        timestamp_str = datetime.fromtimestamp(timestamp_val).strftime('%Y-%m-%d %H:%M:%S')
+                        timestamp_str = datetime.fromtimestamp(timestamp_val).strftime(
+                            "%Y-%m-%d %H:%M:%S"
+                        )
                     else:
                         timestamp_str = str(timestamp_val)
-                    
-                    # Extract message from event data
-                    message = ''
-                    if 'data' in event_data and 'content' in event_data['data']:
-                        message = event_data['data']['content']
-                    elif 'event_type' in event_data:
+
+                    message = ""
+                    if "data" in event_data and "content" in event_data["data"]:
+                        message = event_data["data"]["content"]
+                    elif "event_type" in event_data:
                         message = f"Event: {event_data['event_type']}"
                     else:
-                        message = json.dumps(event_data.get('data', {}))
-                    
+                        message = json.dumps(event_data.get("data", {}))
+
                     activities.append({
-                        'timestamp': timestamp_str,
-                        'message': message,
-                        'sender': event_data.get('source', 'unknown'),
-                        'data': event_data
+                        "timestamp": timestamp_str,
+                        "message": message,
+                        "sender": event_data.get("source", "unknown"),
+                        "data": event_data,
                     })
                 except Exception as e:
-                    logger.warning(f"Failed to parse Redis event: {e}")
+                    logger.warning("Failed to parse Redis event: %s", e)
                     continue
-        
+
         return {"success": True, "data": {"activities": activities, "count": len(activities)}}
-        
+
     except Exception as e:
-        logger.error(f"Failed to get recent activity: {e}")
+        logger.error("Failed to get recent activity: %s", e)
         return {"success": True, "data": {"activities": [], "count": 0, "error": str(e)}}
+
+
+@app.websocket("/ws/activity")
+async def activity_websocket(websocket: WebSocket):
+    """WebSocket endpoint for real-time stream activity updates (Superuser only).
+
+    Resolves the session user from the cookie at connect; rejects non-Superusers
+    with close code 4403 before any event is delivered.
+    """
+    cookie_name = config_manager.config.auth.cookie_name
+    cookie_header = websocket.headers.get("cookie", "")
+    token = None
+    if cookie_header:
+        from http.cookies import SimpleCookie
+        jar = SimpleCookie()
+        try:
+            jar.load(cookie_header)
+            morsel = jar.get(cookie_name)
+            token = morsel.value if morsel else None
+        except Exception:
+            pass
+
+    uid = session_store.validate_session(token) if token else None
+    user = user_store.get_user_by_id(uid) if uid else None
+    if not user or not user["is_active"] or not user["is_superuser"]:
+        await websocket.close(code=4403)
+        return
+
+    await event_subscriber.ws_manager.connect(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        event_subscriber.ws_manager.disconnect(websocket)
+    except Exception:
+        event_subscriber.ws_manager.disconnect(websocket)
 
 
 @app.post("/api/services/{app_id}/enable")
@@ -1154,6 +1521,7 @@ async def start_app_process(app_id: str):
                 "Previously registered tools were removed. App stopped.",
             )
 
+        await asyncio.to_thread(caddy_manager.on_app_registered, app_id)
         return {"success": True, "message": f"App {app_id} started successfully"}
 
     except HTTPException:
@@ -1183,6 +1551,7 @@ async def stop_app_process(app_id: str):
         if mcp_gateway:
             await mcp_gateway.on_app_stopped(app_id)
 
+        await asyncio.to_thread(caddy_manager.on_app_deregistered, app_id)
         return {"success": True, "message": f"App {app_id} stopped successfully"}
 
     except HTTPException:
@@ -1221,6 +1590,7 @@ async def restart_app_process(app_id: str):
                 "Previously registered tools were removed. App stopped.",
             )
 
+        await asyncio.to_thread(caddy_manager.on_app_registered, app_id)
         return {"success": True, "message": f"App {app_id} restarted successfully"}
 
     except HTTPException:
@@ -1256,24 +1626,33 @@ async def get_app_process_info(app_id: str):
 
 
 @app.post("/api/system/restart")
-async def restart_latarnia():
-    """Restart Latarnia application"""
-    try:
-        import os
-        import sys
-        
-        logger.info("Latarnia restart requested via API")
-        
-        # Trigger a restart by exiting with a special code
-        # The process supervisor (systemd, launchd, etc.) should restart it
-        # For development, we'll just log it
-        logger.warning("Restart requested - this would restart the application in production")
-        
-        return {"success": True, "message": "Restart initiated"}
-        
-    except Exception as e:
-        logger.error(f"Failed to restart Latarnia: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+async def restart_latarnia(request: Request):
+    """Restart Latarnia application (Superuser only)."""
+    _require_superuser(request)
+    import asyncio
+    import os
+    import platform
+    import subprocess
+
+    logger.info("Latarnia restart requested via API")
+
+    if platform.system() != "Linux":
+        logger.warning("Restart requested — no-op on non-Linux platform")
+        return {"success": True, "message": "Restart is a no-op on non-Linux platforms"}
+
+    env = os.environ.get("ENV", "dev").lower()
+    unit = f"latarnia-{env}.service"
+    logger.info("Scheduling restart of platform unit %s", unit)
+
+    async def _restart():
+        await asyncio.sleep(1)
+        try:
+            subprocess.Popen(["sudo", "systemctl", "restart", unit])
+        except Exception as exc:
+            logger.error("Failed to restart platform unit %s: %s", unit, exc)
+
+    asyncio.create_task(_restart())
+    return {"success": True, "message": f"Restart initiated for {unit}"}
 
 
 # Streamlit App Management Endpoints

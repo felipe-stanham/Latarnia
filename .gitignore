@@ -217,6 +217,11 @@ Thumbs.db
 
 # Deployment secrets (connection credentials per target)
 .deploy-secrets
+# Per-environment secrets file (operator-managed, never committed)
+secrets.env
+
+# Config (host-specific — committed as config.example.json, actual config is gitignored)
+config/config.json
 
 # Latarnia specific
 # Ignore apps directory to allow user-provided sample applications
@@ -224,5 +229,10 @@ apps/
 # Keep runtime data and logs local (no persistence needed)
 data/
 logs/
+# Generated Caddyfile include (host-specific, written at runtime by
+# CaddyConfigManager). Root-anchored so it does NOT match src/latarnia/caddy/.
+/caddy/
+# Host-specific deployment notes (targets, SSH, quirks) — never committed
+docs/local/
 # Deployment log (local operational record, not source code)
 DEPLOYMENTS.md
