@@ -77,17 +77,17 @@ class CaddyConfigManager:
     def _site_address(self) -> str:
         """Caddy site address for this environment.
 
-        PRD listens on `{domain}:443`, TST on `{domain}:8443`. For `dev`
-        (or a `localhost` domain) the bare `localhost` address is used so
-        Caddy serves its automatic self-signed cert.
+        PRD and TST both listen on `{domain}:443`; each env has its own
+        domain (e.g. `home.stanham.com` / `home-tst.stanham.com`) and Caddy
+        picks the site by SNI/Host. For `dev` (or a `localhost` domain) the
+        bare `localhost` address is used so Caddy serves its automatic
+        self-signed cert.
         """
         domain = self.config_manager.get_domain()
         env = self.env
         if domain == "localhost":
             return "localhost"
-        if env == "tst":
-            return f"{domain}:8443"
-        if env == "prd":
+        if env in ("tst", "prd"):
             return f"{domain}:443"
         return "localhost"
 

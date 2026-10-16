@@ -18,3 +18,4 @@
 | [T-0014](T-0014.md) | Secret Manager leaves stale per-app secret files | [ ] |
 | [T-0015](T-0015.md) | Dead app-count regression guard in both deploy workflows | [ ] |
 | [T-0016](T-0016.md) | `pytest.ini` is inert; suite imports by alphabetical luck | [ ] |
+| [T-0017](T-0017.md) | TST serves on its own domain (`home-tst.stanham.com`) at `:443` | [DONE] |

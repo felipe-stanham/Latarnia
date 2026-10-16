@@ -156,10 +156,11 @@ def test_prd_site_address_uses_domain_443(tmp_path, monkeypatch):
     assert "home.stanham.com:443 {" in config
 
 
-def test_tst_site_address_uses_domain_8443(tmp_path, monkeypatch):
-    mgr = _manager(tmp_path, [], monkeypatch, env="tst", domain="home.stanham.com")
+def test_tst_site_address_uses_own_domain_443(tmp_path, monkeypatch):
+    mgr = _manager(tmp_path, [], monkeypatch, env="tst", domain="home-tst.stanham.com")
     config = mgr.generate_config()
-    assert "home.stanham.com:8443 {" in config
+    assert "home-tst.stanham.com:443 {" in config
+    assert "8443" not in config
 
 
 def test_web_ui_app_emits_public_and_protected_blocks(tmp_path, monkeypatch):
