@@ -1,39 +1,23 @@
 name: Deploy to PRD
 
-# Every prd host deploys from the same `main` push, so the instances cannot
-# drift to different versions. Adding a prd host = add its runner label to the
-# matrix below (and bootstrap the host per docs/local/deployment.md).
+# prd runs on the homeserver only (hetzner-latarnia-1 was decommissioned,
+# T-0018). Adding a prd host again = bootstrap it per docs/local/deployment.md,
+# register a runner with its own label, and fan out via a `fail-fast: false`
+# matrix keyed on those labels (see T-0005 for the previous version).
 
 on:
   push:
     branches: [main]
-  # Escape hatch: re-deploy the current `main` to a host that was offline (or
-  # failed) during a push, without needing an empty commit.
+  # Escape hatch: re-deploy the current `main` (e.g. after a failed run)
+  # without needing an empty commit.
   workflow_dispatch:
-    inputs:
-      host:
-        description: Which prd host(s) to deploy
-        type: choice
-        default: both
-        options:
-          - both
-          - homeserver
-          - hetzner-latarnia-1
 
 jobs:
   deploy:
-    name: Deploy to ${{ matrix.host }} (prd)
-    # `inputs.host` is empty on push events, so both hosts are selected unless a
-    # workflow_dispatch explicitly narrows it.
-    runs-on: [self-hosted, "${{ matrix.host }}"]
+    name: Deploy to homeserver (prd)
+    # Pinned to the homeserver label, never bare `self-hosted` (runner-labels-not-arch).
+    runs-on: [self-hosted, homeserver]
     environment: production
-    strategy:
-      # A host failing must not cancel a deploy already in flight on the other:
-      # a half-applied host is worse than a failed one, and a partial deploy has
-      # to stay visible as a red run rather than a cancelled one.
-      fail-fast: false
-      matrix:
-        host: ${{ fromJSON(inputs.host != '' && inputs.host != 'both' && format('["{0}"]', inputs.host) || '["homeserver","hetzner-latarnia-1"]') }}
 
     steps:
       - name: Capture pre-deploy state
@@ -44,7 +28,7 @@ jobs:
           PRE_COUNT=$(curl -sf --max-time 5 http://localhost:$PORT/api/apps | python3 -c "import sys,json; print(json.load(sys.stdin)['total_count'])" 2>/dev/null || echo "-1")
           echo "PRE_HEALTH=$PRE_HEALTH" >> $GITHUB_ENV
           echo "PRE_COUNT=$PRE_COUNT" >> $GITHUB_ENV
-          echo "Pre-deploy on ${{ matrix.host }}: health=$PRE_HEALTH, apps=$PRE_COUNT"
+          echo "Pre-deploy on homeserver: health=$PRE_HEALTH, apps=$PRE_COUNT"
 
       - name: Backup deploy folder
         run: |
@@ -104,9 +88,9 @@ jobs:
 
       - name: Report deployed commit
         # always(): a failed health gate still leaves the host on the new commit
-        # (the reset already ran), which is precisely when parity must be visible.
+        # (the reset already ran), which is precisely when it must be visible.
         if: always()
         run: |
           cd /opt/latarnia/prd
-          echo "${{ matrix.host }} is now on $(git rev-parse HEAD)"
-          echo "### ${{ matrix.host }}: \`$(git rev-parse --short HEAD)\`" >> $GITHUB_STEP_SUMMARY
+          echo "homeserver is now on $(git rev-parse HEAD)"
+          echo "### homeserver: \`$(git rev-parse --short HEAD)\`" >> $GITHUB_STEP_SUMMARY
