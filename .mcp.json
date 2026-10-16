@@ -1,9 +1,5 @@
 {
   "mcpServers": {
-    "latarnia-tst": {
-      "type": "sse",
-      "url": "http://192.168.68.100:8000/mcp/sse"
-    },
     "playwright": {
       "command": "npx",
       "args": ["@playwright/mcp@latest"]

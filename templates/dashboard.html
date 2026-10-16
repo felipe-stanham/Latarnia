@@ -364,24 +364,34 @@
     return badges.join(' ');
   }
 
-  function buildErrorAlerts(app) {
-    const alerts = [];
+  // T-0019: list every known reason for a warning/error status under the
+  // badge. `overall_status_detail` is the backend's combined reason (the
+  // /health message, or a platform reason like "systemd unit failed").
+  function buildStatusReasons(app) {
+    const reasons = [];
+    const add = (r) => { if (r && !reasons.includes(r)) reasons.push(r); };
     // Migration failure
     if (app.database_info && app.database_info.provisioned === false && app.manifest?.config?.database) {
-      alerts.push('<small class="text-danger d-block">DB provisioning failed</small>');
+      add("DB provisioning failed");
     }
     // Unmet dependencies
-    const deps = app.dependencies || [];
-    const unmet = deps.filter(d => !d.satisfied);
+    const unmet = (app.dependencies || []).filter(d => !d.satisfied);
     if (unmet.length > 0) {
-      const names = unmet.map(d => d.app).join(', ');
-      alerts.push(`<small class="text-danger d-block">Unmet deps: ${names}</small>`);
+      add(`Unmet deps: ${unmet.map(d => d.app).join(', ')}`);
     }
     // App in error state
-    if (app.status === 'error' && app.runtime_info?.error_message) {
-      alerts.push(`<small class="text-danger d-block">${app.runtime_info.error_message}</small>`);
-    }
-    return alerts.join('');
+    if (app.status === 'error') add(app.runtime_info?.error_message);
+
+    const status = String(appDisplayStatus(app) || "").toLowerCase();
+    const isError = status === "red" || status === "error";
+    const isWarning = status === "yellow" || status === "warning";
+    if (isError || isWarning) add(app.overall_status_detail);
+    if (reasons.length === 0) return '';
+
+    // Colour follows the badge; DB/deps alerts on a non-warning tile stay red.
+    const cls = isWarning ? "text-warning-emphasis" : "text-danger";
+    const items = reasons.map(r => `<li>${esc(r)}</li>`).join('');
+    return `<ul class="small ${cls} mb-2 ps-3">${items}</ul>`;
   }
 
   function renderApps(apps) {
@@ -424,7 +434,8 @@
               <span class="d-flex align-items-center gap-2">${roleBadgeHtml(app.name)}<small class="text-muted text-uppercase">${app.type}</small></span>
             </h5>
             <p class="card-text small text-muted mb-2">${app.description || "No description"}</p>
-            <p class="mb-2">Status: ${statusHtml}</p>
+            <p class="mb-1">Status: ${statusHtml}</p>
+            ${buildStatusReasons(app)}
             <p class="mb-2"><small class="text-muted">Version: ${app.version}</small></p>
             <div class="mt-auto d-flex gap-2 flex-wrap">
               <button class="btn btn-sm btn-primary" onclick="launchStreamlitApp('${app.app_id}', '${app.name}')">🚀 Launch</button>
@@ -448,8 +459,7 @@
       // Build capability badges
       const capBadges = buildCapabilityBadges(app);
 
-      // Build error alerts
-      const errorAlerts = buildErrorAlerts(app);
+      const statusReasons = buildStatusReasons(app);
 
       col.innerHTML = `
         <div class="card h-100 hh-card">
@@ -460,8 +470,8 @@
             </h5>
             <p class="card-text small text-muted mb-2">${app.description || "No description"}</p>
             <p class="mb-1">Status: ${statusHtml}</p>
+            ${statusReasons}
             ${capBadges ? `<div class="hh-cap-badges mb-2">${capBadges}</div>` : ''}
-            ${errorAlerts}
             <p class="mb-2"><small class="text-muted">Version: ${app.version}</small></p>
             <div class="mt-auto d-flex gap-2 flex-wrap">
               ${hasWebUI ? `<a class="btn btn-sm btn-primary" href="/apps/${app.name}/" target="_blank">Web UI</a>` : ''}
