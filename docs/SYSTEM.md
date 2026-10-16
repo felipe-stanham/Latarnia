@@ -13,9 +13,7 @@ Latarnia is a unified home automation platform for Raspberry Pi 5 (8GB RAM) that
 - **systemd integration**: Service apps managed as systemd units for reliability
 
 ## Cross-Project Constraints
-- Target hardware: two supported host profiles, both Debian-based Linux. Code must be arch-agnostic (each App builds its own venv on the host):
-  - Raspberry Pi 5, 8GB RAM, ARM64, Raspberry Pi OS — runs `dev`/`tst`/`prd`
-  - Hetzner VPS, 3.8GB RAM / 2 vCPU, x86_64, Debian 13 — runs `prd` only (lower app density)
+- Target hardware: Raspberry Pi 5, 8GB RAM, ARM64, Raspberry Pi OS — runs `dev`/`tst`/`prd`. Keep code arch-agnostic (each App builds its own venv on the host).
 - Tech stack: Python 3.9+, FastAPI, Bootstrap 5, Redis, Postgres (with `pgvector` enabled cluster-wide as a platform-default extension)
 - Port ranges: Main app on 8000, service apps on 8100-8199, MCP servers on 9001-9099, Streamlit apps on 8501+
 - Environment port isolation (homeserver multi-env):
@@ -81,13 +79,10 @@ cp -r examples/example_companion apps/
 |-------------|--------------|------------------------------------|
 | local       | dev          | Developer workstation (macOS)      |
 | homeserver  | dev, tst, prd| Raspberry Pi 5 — self-hosted multi-environment |
-| hetzner-latarnia-1 | prd   | Hetzner VPS — client-facing prd instance |
 
-`prd` runs on **more than one host**. A single push to `main` deploys every prd
-host via a matrix in `deploy-prd.yml`, so the instances cannot drift to different
-versions; each host is selected by an explicit self-hosted runner label (never by
-the default `ARM64`/`X64` labels). Hosts, labels, and per-host bootstrap are in
-`docs/local/deployment.md`.
+`prd` runs on the homeserver only. Deploys pick the host by its explicit
+self-hosted runner label (`homeserver`), never by the default `ARM64`/`X64`
+labels. Host details and bootstrap are in `docs/local/deployment.md`.
 
 ## Direction of Travel — Future V2 (no ID assigned, not scheduled)
 

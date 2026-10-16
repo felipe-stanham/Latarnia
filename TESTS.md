@@ -273,7 +273,7 @@ These tests require the Playwright MCP server and a running local dev instance o
 - **test_example_webui_role_header:** `GET http://localhost:8100/` with header `X-Latarnia-App-Role: webUI-low` -> no "Add Item" form. With `full` -> "Add Item" form present and an "Admin" section. No header -> defaults to full (backward compatible).
 - **test_mcp_requires_bearer:** Connect an MCP client to `/mcp/sse` without a Bearer token -> 401. With a valid in-scope token -> tool list scoped to the token's apps; the per-app MCP server receives `X-Latarnia-App-Role`.
 
-### Multi-Host prd Parity
+### Deploy Host Pinning
 
-- **test_prd_hosts_same_commit:** After any `main` deploy, `git -C /opt/latarnia/prd rev-parse HEAD` on **every** prd host (homeserver, hetzner-latarnia-1). -> All equal to `origin/main`. Any mismatch means one host's matrix leg failed or its runner was offline — re-run via **Actions -> Deploy to PRD -> Run workflow** for that host.
-- **test_tst_never_lands_on_prd_host:** A `tst` deploy run's job. -> Runner name is the homeserver runner and its labels include `homeserver`. A tst job on any prd-only host is a regression in the `runs-on` label pinning.
+- **test_prd_host_on_main:** After any `main` deploy, `git -C /opt/latarnia/prd rev-parse HEAD` on the homeserver. -> Equals `origin/main`. A mismatch means the run failed or the runner was offline — re-run via **Actions -> Deploy to PRD -> Run workflow**.
+- **test_deploys_pinned_to_homeserver:** A `tst` or `main` deploy run's job. -> Runner name is the homeserver runner and its labels include `homeserver`. Any other runner is a regression in the `runs-on` label pinning.
