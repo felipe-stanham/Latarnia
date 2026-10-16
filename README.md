@@ -1,10 +1,10 @@
-# Latarnia - Unified Home Automation Platform
+# Latarnia - Self-Hosted Platform for Exposing Apps
 
-Latarnia is a unified home automation platform designed to run on Raspberry Pi 5 (8GB RAM) that manages multiple independent applications through a single FastAPI-based web dashboard.
+Latarnia is a self-hosted platform for exposing apps. Drop in an app folder with a `latarnia.json` manifest and Latarnia provisions what it declares (Postgres database, Redis Streams, secrets, ports), runs it under systemd, and publishes its web UI and MCP tools behind a single authenticated ingress (Caddy + TOTP / JWT). It runs on a Raspberry Pi 5 (8GB RAM).
 
 ## Overview
 
-Latarnia provides a centralized management system for home automation applications while maintaining complete independence between apps. It supports two types of applications:
+Latarnia provides centralized provisioning, lifecycle, access control and exposure for apps while maintaining complete independence between them. It supports two types of applications:
 
 - **Service Apps**: Long-running background services with REST APIs
 - **Streamlit Apps**: On-demand interactive UIs with TTL management

@@ -1,6 +1,6 @@
 # Latarnia Architecture
 
-This document describes the overall architecture of the Latarnia unified home automation platform.
+This document describes the overall architecture of Latarnia, a self-hosted platform for exposing Apps.
 
 ## System Overview
 

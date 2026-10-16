@@ -454,7 +454,7 @@ def _require_superuser(request):
 # Create FastAPI app
 app = FastAPI(
     title="Latarnia",
-    description="Unified home automation platform for Raspberry Pi",
+    description="Self-hosted platform for exposing apps",
     version="0.1.0",
     lifespan=lifespan
 )
