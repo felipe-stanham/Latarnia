@@ -13,7 +13,7 @@ graph TB
     end
 
     subgraph "Caddy (systemd system)"
-        CaddyHTTPS[Caddy HTTPS<br/>:443 PRD / :8443 TST]
+        CaddyHTTPS[Caddy HTTPS :443<br/>PRD + TST by domain]
         CaddyTLS[TLS — Let's Encrypt<br/>self-signed for localhost]
     end
 
@@ -249,7 +249,7 @@ graph TB
 ### 12. Caddy Ingress
 - **Purpose**: Caddy (systemd system service) is the single external HTTPS ingress and reverse proxy. The platform's own Python web proxy (`web_proxy.py`) was removed in P-0008.
 - **TLS**: Let's Encrypt ACME (real domains); Caddy self-signed (localhost dev). Domain read from `{ENV}_DOMAIN` config.
-- **Ports**: `:443` PRD, `:8443` TST, `:80` ACME HTTP-01 challenge.
+- **Ports**: `:443` for both PRD and TST, each on its own domain (`{PRD_DOMAIN}` / `{TST_DOMAIN}`) and routed by SNI/Host; `:80` ACME HTTP-01 challenge (T-0017 — TST was `:8443` before it had its own domain).
 - **Route structure** (generated per environment by `CaddyConfigManager`):
   - `/auth/*`, `/docs*`, `/openapi.json` — public, proxied to Latarnia `:8000`
   - `/apps/{name}/docs*`, `/apps/{name}/openapi.json` — public, proxied directly to app port (Service Apps only)
@@ -532,7 +532,7 @@ localhost:8000 (Main Dashboard + API + MCP Gateway at /mcp)
 
 ### Production Environment (Raspberry Pi)
 ```
-Caddy :443 PRD / :8443 TST (Let's Encrypt TLS, ufw allows 80/443/8443/22)
+Caddy :443 PRD + TST by domain (Let's Encrypt TLS, ufw allows 80/443/22)
 └── forward_auth → localhost:8000 (/auth/verify — added Scope 2)
 localhost:8000 (Main Dashboard + API + MCP Gateway at /mcp — internal only)
 ├── Internal:8100-8199 (Service App REST servers — internal only)
@@ -542,7 +542,7 @@ localhost:8000 (Main Dashboard + API + MCP Gateway at /mcp — internal only)
 
 systemd system unit:
 /etc/systemd/system/
-└── caddy.service  (ports 80 ACME, 443 PRD, 8443 TST, 2019 admin)
+└── caddy.service  (ports 80 ACME, 443 PRD + TST, 2019 admin)
 
 systemd --user units (per-app, generated at runtime):
 ~/.config/systemd/user/

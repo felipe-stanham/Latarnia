@@ -21,7 +21,7 @@ jobs:
   deploy:
     name: Deploy to homeserver (tst)
     # Pinned to the homeserver label: tst exists only there, and a bare
-    # `self-hosted` would let this job land on a prd-only host (T-0005).
+    # `self-hosted` is non-deterministic as soon as a second runner exists.
     runs-on: [self-hosted, homeserver]
 
     steps:
