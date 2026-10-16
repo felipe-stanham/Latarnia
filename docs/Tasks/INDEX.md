@@ -20,3 +20,4 @@
 | [T-0016](T-0016.md) | `pytest.ini` is inert; suite imports by alphabetical luck | [ ] |
 | [T-0017](T-0017.md) | TST serves on its own domain (`home-tst.stanham.com`) at `:443` | [DONE] |
 | [T-0018](T-0018.md) | Remove the decommissioned Hetzner prd host from workflow + docs | [DONE] |
+| [T-0019](T-0019.md) | App tiles show why an App is in warning or error | [DONE] |

@@ -6,7 +6,7 @@ Auto-approval of project MCP servers is set via `enableAllProjectMcpServers: tru
 
 ## Current Servers
 
-- `latarnia-tst` — SSE connection to the Latarnia TST environment on the Raspberry Pi (`http://192.168.68.100:8000/mcp/sse`). Exposes tools from deployed apps.
+- _(removed 2026-10-16)_ `latarnia-tst` — was an SSE connection to `http://192.168.68.100:8000/mcp/sse`. It stopped working once ufw/Caddy became the only ingress (port 8000 times out off-host). Removed until the MCP topic is revisited — see MEMORY `mcp-pending-review`.
 - `playwright` — Local stdio server (`npx @playwright/mcp@latest`). Used for browser-level testing of dashboards and web UIs.
 
 ## User Profile
