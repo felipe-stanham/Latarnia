@@ -1,6 +1,6 @@
 # Latarnia Architecture
 
-This document describes the overall architecture of the Latarnia unified home automation platform.
+This document describes the overall architecture of Latarnia, a self-hosted platform for exposing Apps.
 
 ## System Overview
 
@@ -37,6 +37,7 @@ graph TB
             RoleStore[RoleStore<br/>per-app role lookup + assignment]
             JWTAuth[JWTAuth + MachineTokenStore<br/>HS256 sign/validate/revoke]
             JWTMiddleware[JWTAuthMiddleware<br/>gates /api/* — Bearer or session]
+            APIDocs[API Docs router<br/>/docs/apps/... pages + schemas]
         end
 
         subgraph "Message Bus"
@@ -90,7 +91,9 @@ graph TB
     JWTMiddleware --> SessionStore
     CaddyHTTPS -->|after auth, handle_path strips prefix| SvcApp1
     CaddyHTTPS -->|after auth, handle_path strips prefix| SvcApp2
-    CaddyHTTPS -->|/apps/{name}/docs no auth| SvcApp1
+    APIDocs -->|GET /openapi.json on app port| SvcApp1
+    FastAPI --> APIDocs
+    APIDocs --> RoleStore
 
     FastAPI --> AppMgr
     FastAPI --> Router
@@ -251,11 +254,11 @@ graph TB
 - **TLS**: Let's Encrypt ACME (real domains); Caddy self-signed (localhost dev). Domain read from `{ENV}_DOMAIN` config.
 - **Ports**: `:443` for both PRD and TST, each on its own domain (`{PRD_DOMAIN}` / `{TST_DOMAIN}`) and routed by SNI/Host; `:80` ACME HTTP-01 challenge (T-0017 — TST was `:8443` before it had its own domain).
 - **Route structure** (generated per environment by `CaddyConfigManager`):
-  - `/auth/*`, `/docs*`, `/openapi.json` — public, proxied to Latarnia `:8000`
-  - `/apps/{name}/docs*`, `/apps/{name}/openapi.json` — public, proxied directly to app port (Service Apps only)
+  - `/auth/*` — public, proxied to Latarnia `:8000`
   - `/api/*`, `/mcp/*` — proxied to Latarnia `:8000` **without** `forward_auth`; Latarnia authenticates internally (`JWTAuthMiddleware` accepts a Bearer JWT or session cookie on `/api/*`; the MCP gateway validates the Bearer JWT on `/mcp`). `forward_auth` only checks the session cookie, so it would reject machine tokens (T-0002).
   - `/apps/{name}/*` — protected via `forward_auth` to `/auth/verify`; Caddy strips the `/apps/{name}` prefix with `handle_path` before proxying to app port (Service Apps only; Streamlit Apps have no Caddy route block)
-  - `/*` catch-all — protected via `forward_auth`; proxied to Latarnia `:8000` (dashboard and other browser routes)
+  - `/*` catch-all — protected via `forward_auth`; proxied to Latarnia `:8000` (dashboard, platform `/docs` and `/openapi.json`, API docs pages, and other browser routes). Any logged-in user can open them; the API docs router applies the per-App role check.
+  - Apps' own `/docs` and `/openapi.json` are **not** published publicly (T-0020): `/apps/{name}/docs` and `/apps/{name}/openapi.json` are ordinary protected App routes, and the platform serves App API docs itself (component 14).
 - **Auth headers copied**: `X-Latarnia-User`, `X-Latarnia-App-Role`, `X-Latarnia-Is-Super`
 - **CaddyConfigManager** (`src/latarnia/caddy/manager.py`): reads the App Registry, generates the per-environment Caddyfile include at `/opt/latarnia/{env}/caddy/latarnia.caddyfile`, then reloads Caddy via `POST /load` on the Caddy admin API (`:2019`). Called on every App registration change.
 - **Firewall**: `ufw` blocks Latarnia `:8000` and app ports `:81xx` / `:90xx` from external access — all external traffic enters through Caddy only.
@@ -272,6 +275,23 @@ These components implement persistent authentication, authorization, and machine
 - **JWTAuth / MachineTokenStore** (`src/latarnia/auth/jwt_auth.py`, `tokens.py`): Signs and validates HS256 JWTs (key: `LATARNIA_JWT_SECRET` from `secrets.env`). JWT claims: `{sub, iat, exp, apps, super}`. `MachineTokenStore` persists tokens to the `machine_tokens` table (SHA-256 of raw JWT stored, never plaintext) and supports create/list/revoke. Token management API: `POST /api/auth/tokens`, `GET /api/auth/tokens`, `DELETE /api/auth/tokens/{id}`.
 - **JWTAuthMiddleware** (`src/latarnia/auth/middleware.py`): Pure-ASGI middleware that gates all `/api/*` requests. Accepts either a `Bearer <jwt>` (validated + revocation-checked against `machine_tokens`) or a session cookie. Passes `/mcp` and websocket connections through without session-cookie gating — the MCP Gateway validates its own JWT. Returns 401 on any other unauthenticated request to `/api/*`.
 - **Auth Routes** (`src/latarnia/auth/routes.py`): FastAPI router mounting `/auth/*` (login, setup, logout — browser flows) and `/api/auth/*` (user management, role management, machine token management — JSON API). The `/auth/verify` endpoint is the Caddy `forward_auth` target; it validates the session hash, looks up the per-app role via `RoleStore`, and returns `X-Latarnia-User`, `X-Latarnia-App-Role`, and `X-Latarnia-Is-Super` headers.
+
+### 14. API Docs (T-0020)
+- **Purpose**: Platform-owned Swagger docs for each Service App's APIs, served from the platform's `/docs` namespace instead of the App's own URL space.
+- **Module**: `src/latarnia/web/api_docs.py` (`build_api_docs_router(app_manager, role_store, session_resolver)`), included in `main.py`.
+- **Behaviour**: fetches the App's internal `/openapi.json` straight from its registry port (never published by Caddy), splits it by path prefix — `/api/` is the **UI API**, `/rest/` is the **App REST API** — prunes component schemas the half does not reference (`securitySchemes` are kept so "Authorize" still works), and rewrites `servers` to `/apps/{name}` (UI API) or `/rest/{name}` (App REST API; paths re-rooted under that server URL) so "Try it out" hits the public path.
+- **Routes**:
+
+| Route | Returns | Auth path |
+|---|---|---|
+| `GET /docs/apps/{name}/{ui\|rest}` | Swagger UI page (HTML; error page on failure) | Session, via Caddy `/*` `forward_auth` |
+| `GET /api/docs/apps/{name}/{ui\|rest}` | Split OpenAPI schema | `JWTAuthMiddleware`: session or Machine Token |
+| `GET /api/docs/apps/{name}` | `{app, running, ui, rest}` — which halves exist (drives dashboard buttons) | `JWTAuthMiddleware`: session or Machine Token |
+
+- **Access**: a role other than `none` on that App (superuser always passes; a Machine Token needs the App in its scope). Checked before App existence, so callers cannot distinguish a missing App from a forbidden one.
+- **Errors**: `403` no access; `404` unknown App, unknown kind, non-Service App, or the App has no routes under that prefix; `503` App not running (no port or no answer within 3 s). The summary endpoint returns `running: false` instead of 503.
+- **Dashboard**: header link "API docs" to `/docs`; running Service App tiles show "UI API" / "REST API" buttons based on the summary endpoint.
+- **Reserved paths**: `public_routes` no longer reserves `/docs`; `/health` and `/openapi.json` stay reserved (see `app-specification.md`).
 
 ## Application Types
 
@@ -474,11 +494,13 @@ sequenceDiagram
     C->>App: GET /dashboard [X-Latarnia-User: uid, X-Latarnia-App-Role: webUI-med]
     App-->>Browser: 200 OK HTML
 
-    Note over Browser,App: Public swagger (no forward_auth)
+    Note over Browser,App: App's own /docs is an ordinary protected route (no public bypass)
 
-    Browser->>C: GET /apps/crm/docs
-    C->>App: GET /docs (no auth check)
-    App-->>Browser: 200 OK Swagger UI
+    Browser->>C: GET /apps/crm/docs [Cookie: latarnia_session=abc]
+    C->>AV: GET /auth/verify [X-Forwarded-Uri: /apps/crm/docs]
+    AV-->>C: 200 [role headers]
+    C->>App: GET /docs
+    App-->>Browser: 200 OK
 
     Note over Browser,App: Auth failure
 

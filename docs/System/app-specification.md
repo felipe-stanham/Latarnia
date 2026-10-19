@@ -86,7 +86,7 @@ Each app must include a `latarnia.json` file in its root directory:
 - **config.redis_streams_publish**: Array of stream names this app publishes to (default: []). Each stream can have at most one publisher.
 - **config.redis_streams_subscribe**: Array of stream names this app subscribes to (default: []). Consumer groups are created per subscribing app.
 - **config.requires_secrets**: Array of environment-variable names the app needs at runtime (default: []). The platform injects matching values from `/opt/latarnia/{env}/secrets.env` into the app's process environment at launch (P-0006). The platform refuses to start the app if any declared name is missing from the master file. See the "Secrets" section below for the operator-side contract.
-- **config.public_routes**: Array of path-prefix strings (default: []). Each prefix is served by Caddy without `forward_auth` — fully anonymous, identity headers stripped. The app receives the path with `/apps/{name}` removed (e.g. `/apps/x/b/foo` → `/b/foo`). Validation rules: each entry must start with `/`; entries that are exactly `/`, are empty, or overlap reserved paths (`/health`, `/docs`, `/openapi.json`) are silently dropped with a WARNING log — the app still starts and the Caddyfile is unaffected for those entries. Changes take effect on the next app discovery or platform restart. `/b/` is the platform convention for public bundles (see Path Conventions above).
+- **config.public_routes**: Array of path-prefix strings (default: []). Each prefix is served by Caddy without `forward_auth` — fully anonymous, identity headers stripped. The app receives the path with `/apps/{name}` removed (e.g. `/apps/x/b/foo` → `/b/foo`). Validation rules: each entry must start with `/`; entries that are exactly `/`, are empty, or overlap reserved paths (`/health`, `/openapi.json`) are silently dropped with a WARNING log — the app still starts and the Caddyfile is unaffected for those entries. Changes take effect on the next app discovery or platform restart. `/b/` is the platform convention for public bundles (see Path Conventions above).
 - **install.setup_commands**: Shell commands to run during installation
 - **events.publishes**: Array of event types this app publishes (see Redis Events section)
 - **events.subscribes**: Array of event types this app subscribes to (see Redis Events section)
@@ -112,11 +112,24 @@ The platform and Caddy unconditionally own certain path prefixes on every app. A
 | Path prefix | Owner | Behavior |
 |---|---|---|
 | `/health` | Platform | Required health probe. Apps must implement this endpoint exactly as specified below. |
-| `/docs` | Caddy (P-0008 cap-005) | Swagger UI. Caddy bypasses `forward_auth` for this path — it is **always public, no auth required**. Any app route registered here is publicly reachable without a session. |
-| `/openapi.json` | Caddy (P-0008 cap-005) | OpenAPI schema. Same public bypass as `/docs`. |
+| `/openapi.json` | Platform (T-0020) | The App's OpenAPI schema. **Internal contract:** the platform reads it straight from the App's port to render the App's API docs. Caddy never publishes it — `/apps/{name}/openapi.json` is an ordinary protected App route. |
 | `/b/` | Platform convention | Public bundle hosting prefix. Routes under `/b/` are served without `forward_auth` when `public_routes` includes this prefix in the manifest. Reserved so all apps using the public-bundle pattern use a consistent, well-known namespace. Do not use `/b/` for authenticated routes. |
 
-**Why this matters for `/docs`:** Caddy's `forward_auth` bypass is a blanket rule matched by path prefix — it does not check what the app actually serves at that path. An app that registers its own business logic at `/docs` will expose that logic to anyone on the network without authentication.
+`/docs` is **not** reserved (since T-0020): an App may use it for its own routes, which are served behind login like any other App route — unless the App explicitly lists `/docs` in `public_routes`, which makes it anonymous. Apps should disable FastAPI's own Swagger (`FastAPI(docs_url=None, redoc_url=None)`) — the platform renders it instead (see API Docs below).
+
+### API Docs (T-0020)
+
+An App's API docs are platform pages, never part of the App's own URL space. The platform fetches the App's `/openapi.json`, splits it by path prefix, and renders each half with Swagger UI:
+
+| Docs | Page | Schema | Documents | Visible to |
+|------|------|--------|-----------|------------|
+| Latarnia | `/docs` | `/openapi.json` | the platform API | any logged-in user |
+| UI API | `/docs/apps/{name}/ui` | `/api/docs/apps/{name}/ui` | App routes under `/api/` (server `/apps/{name}`) | role other than `none` on the App |
+| App REST API | `/docs/apps/{name}/rest` | `/api/docs/apps/{name}/rest` | App routes under `/rest/` (server `/rest/{name}`) | role other than `none` on the App, by session or Machine Token |
+
+- Only paths under `/api/` and `/rest/` are documented; other routes (`/health`, `/ui`, pages, `public_routes`) are not.
+- The dashboard shows an "API docs" button (→ `/docs`) and, on each running Service App tile, "UI API" / "REST API" buttons for the halves that have at least one route.
+- A half with no routes returns 404; a stopped App returns 503 ("App not running").
 
 **`/b/` and `public_routes` (T-0004):** Apps declare public prefixes via `public_routes` (array of path strings, default `[]`) in `manifest.config`. The Caddyfile generator emits a `handle` block for each prefix — no `forward_auth`, identity headers stripped — before the protected `handle_path /apps/{name}/*` block. See Optional Fields below for the full spec including validation rules.
 
@@ -789,7 +802,7 @@ if args.data_dir:
     logger.info(f"Data directory: {data_dir}")
 
 # Create FastAPI app
-app = FastAPI()
+app = FastAPI(docs_url=None, redoc_url=None)  # API docs are rendered by the platform (T-0020)
 
 # Health endpoint (REQUIRED)
 @app.get("/health")
@@ -1412,7 +1425,7 @@ A minimal web UI in a FastAPI app:
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 
-app = FastAPI()
+app = FastAPI(docs_url=None, redoc_url=None)  # API docs are rendered by the platform (T-0020)
 
 @app.get("/", response_class=HTMLResponse)
 async def web_ui():

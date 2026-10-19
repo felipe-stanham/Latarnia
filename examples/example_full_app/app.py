@@ -286,7 +286,9 @@ def _stream_subscriber(redis_url_str: str):
 # REST API
 # ---------------------------------------------------------------------------
 
-rest_app = FastAPI(title="Example Full App")
+# T-0020: the platform renders this App's API docs at /docs/apps/example_full_app/{ui,rest}
+# from its internal /openapi.json, so the App does not publish its own Swagger.
+rest_app = FastAPI(title="Example Full App", docs_url=None, redoc_url=None)
 
 
 @rest_app.get("/health")
@@ -416,6 +418,17 @@ async def get_event(event_id: int):
 @rest_app.get("/api/events")
 async def list_events():
     return db_list_events()
+
+
+# T-0020: App REST API route (machine-facing, /rest/ prefix). Documented by the
+# platform at /docs/apps/example_full_app/rest; routed at /rest/example_full_app/
+# once I-0002 lands.
+@rest_app.get("/rest/v1/items")
+async def rest_list_items(request: Request):
+    return {
+        "caller_role": request.headers.get("x-latarnia-app-role"),
+        "items": db_list_items(),
+    }
 
 
 @rest_app.get("/api/state")

@@ -1,7 +1,7 @@
 # System: Latarnia
 
 ## What This System Does
-Latarnia is a unified home automation platform for Raspberry Pi 5 (8GB RAM) that manages multiple independent applications through a single web dashboard. It provides auto-discovery, lifecycle management (via systemd), health monitoring, and a Redis-based message bus for inter-app communication. Apps can be either long-running **Service Apps** (FastAPI with REST APIs) or on-demand **Streamlit Apps** (with TTL-based cleanup).
+Latarnia is a self-hosted platform for exposing Apps. An App is a folder with a `latarnia.json` Manifest; the platform discovers it, provisions what it declares (Postgres database, Redis Streams, Secrets, ports), runs it under systemd, monitors its health, and publishes it behind a single authenticated ingress (Caddy + TOTP sessions / JWT machine tokens). Users are platform-wide and receive a per-App role. Each App is exposed through its web UI (via the dashboard) and its MCP tools (aggregated by the MCP Gateway). Apps can be either long-running **Service Apps** (FastAPI) or on-demand **Streamlit Apps** (with TTL-based cleanup). It runs on a Raspberry Pi 5 (8GB RAM) with `dev`/`tst`/`prd` side by side.
 
 ## Architecture Principles
 - **Manual refresh pattern**: No auto-updates to reduce Pi resource usage
@@ -56,7 +56,7 @@ you need to see open work; never at session startup.
 
 | Tool        | Config location  | Purpose                                                |
 |-------------|------------------|--------------------------------------------------------|
-| pytest      | `tests/unit/`, `tests/integration/` | Run via `PYTHONPATH=src python3 -m pytest tests/ -q` (486 passed, 1 skipped as of T-0013). **`PYTHONPATH=src` is required** — the package is not installed in the venv and `pytest.ini` is inert (see T-0016); without it collection fails. |
+| pytest      | `tests/unit/`, `tests/integration/` | Run via `PYTHONPATH=src python3 -m pytest tests/ -q` (504 passed, 1 skipped as of T-0020). **`PYTHONPATH=src` is required** — the package is not installed in the venv and `pytest.ini` is inert (see T-0016); without it collection fails. |
 | Playwright MCP | `.mcp.json`  | Browser-level testing for dashboards and web UIs — available as `playwright` MCP server |
 
 MCP servers are configured in `.mcp.json` at the project root.

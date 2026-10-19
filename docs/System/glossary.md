@@ -20,6 +20,13 @@ This file is the single source of truth for domain vocabulary across this projec
 
 ---
 
+### App User
+
+**Definition:** A platform user that the platform creates and owns on behalf of an App that consumes other Apps' App REST APIs. It identifies that App as the caller, cannot log in, and is removed together with the App.
+**Not to be confused with:** A person's platform user, which logs in with TOTP and is managed by the superuser.
+
+---
+
 ### Health Check
 
 **Definition:** An HTTP GET probe sent by the platform's Health Monitor to an App's `/health` endpoint, which must return one of `good`, `warning`, or `error`. Service Apps must implement this endpoint; the platform uses the result to determine overall app status and MCP tool availability.
@@ -73,6 +80,13 @@ This file is the single source of truth for domain vocabulary across this projec
 
 ---
 
+### App REST API
+
+**Definition:** The machine-facing API of an App, published by the platform under `/rest/{app}/` for other Apps and external consumers. Accepts only a Machine Token; the platform authenticates the caller and forwards its identity and per-App role, so the App never authenticates.
+**Not to be confused with:** UI API.
+
+---
+
 ### DB Provisioner
 
 **Definition:** The platform component that creates a per-App Postgres database and role, enables platform-default extensions (currently `vector`), and executes pending Migrations during App discovery. Tears down the database on initial provisioning failure (clean-slate). Maps to `db_provisioner.py`.
@@ -83,6 +97,12 @@ This file is the single source of truth for domain vocabulary across this projec
 
 **Definition:** A stateless dispatch function (`pick_launcher`) that selects the correct launcher for an App based on OS and manifest type: `service` + Linux → Service Manager; `service` + Darwin → Subprocess Launcher; `streamlit` → UI Manager.
 **Not to be confused with:** The individual launchers themselves. The Launch Router picks; the launchers act.
+
+---
+
+### Machine Token
+
+**Definition:** A revocable credential issued to a platform user, scoped to a set of Apps with a role per App. Authenticates non-browser clients to the MCP Gateway, the platform API and App REST APIs.
 
 ---
 
@@ -136,6 +156,13 @@ This file is the single source of truth for domain vocabulary across this projec
 ### Tool Index
 
 **Definition:** The in-memory map maintained by the MCP Gateway, keyed by `"{app_name}.{tool_name}"`, recording each tool's originating App, MCP port, and schema. Rebuilt from running Apps on platform startup; not persisted to disk.
+
+---
+
+### UI API
+
+**Definition:** The `/api/{resource}` endpoints of an App that the dashboard reads to render its resources in the web UI, accessed with a browser session. Not intended for machine consumers.
+**Not to be confused with:** App REST API.
 
 ---
 

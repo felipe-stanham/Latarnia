@@ -49,9 +49,11 @@ def test_generate_dev_localhost_site_address(tmp_path, monkeypatch):
     assert "localhost {" in config
     # Public + catch-all blocks always present
     assert "handle /auth/* {" in config
-    assert "handle /docs* {" in config
-    assert "handle /openapi.json {" in config
     assert "handle /* {" in config
+    # T-0020: platform API docs are no longer public — they fall into the
+    # forward_auth catch-all.
+    assert "handle /docs" not in config
+    assert "handle /openapi.json" not in config
     assert "uri /auth/verify" in config
     assert "copy_headers X-Latarnia-User X-Latarnia-App-Role X-Latarnia-Is-Super" in config
 
@@ -167,25 +169,22 @@ def test_web_ui_app_emits_public_and_protected_blocks(tmp_path, monkeypatch):
     apps = [_make_app("my_app", has_web_ui=True, port=8151)]
     mgr = _manager(tmp_path, apps, monkeypatch, env="dev")
     config = mgr.generate_config()
-    # Public swagger (no forward_auth) — uses handle_path to strip prefix
-    assert "handle_path /apps/my_app/docs* {" in config
-    assert "handle_path /apps/my_app/openapi.json {" in config
     # Protected webUI block proxies to the app's port
     assert "handle_path /apps/my_app/* {" in config
     assert "reverse_proxy localhost:8151" in config
 
 
-def test_docs_and_openapi_blocks_strip_identity_headers(tmp_path, monkeypatch):
-    # T-0004: public blocks (docs/openapi) must delete incoming X-Latarnia-*
-    # headers so apps can't be spoofed via the public path.
+def test_app_docs_and_openapi_not_public(tmp_path, monkeypatch):
+    # T-0020 (t20-001, t20-011): no block serves an App's /docs or
+    # /openapi.json without forward_auth. Those paths now reach the App's own
+    # routes through the protected handle_path block, with identity headers.
     apps = [_make_app("my_app", has_web_ui=True, port=8151)]
     mgr = _manager(tmp_path, apps, monkeypatch, env="dev")
     config = mgr.generate_config()
-    docs_body = _block_body(config, "handle_path /apps/my_app/docs* {")
-    assert "header_up -X-Latarnia-User" in docs_body
-    assert "header_up -X-Latarnia-App-Role" in docs_body
-    assert "header_up -X-Latarnia-Is-Super" in docs_body
-    assert "forward_auth" not in docs_body
+    assert "/apps/my_app/docs" not in config
+    assert "/apps/my_app/openapi.json" not in config
+    protected = _block_body(config, "handle_path /apps/my_app/* {")
+    assert "forward_auth" in protected
 
 
 def test_public_routes_block_emitted_with_strip_and_no_forward_auth(tmp_path, monkeypatch):
@@ -227,9 +226,9 @@ def test_invalid_public_route_entries_ignored(tmp_path, monkeypatch):
     # verify the Caddy generator never emits them even if somehow passed through).
     # We test the validator through AppConfig directly.
     from latarnia.managers.app_manager import AppConfig
-    cfg = AppConfig(public_routes=["/", "/b/", "no-slash", "/docs", "/health", ""])
-    # Only "/b/" should survive
-    assert cfg.public_routes == ["/b/"]
+    cfg = AppConfig(public_routes=["/", "/b/", "no-slash", "/openapi.json", "/health", "", "/docs"])
+    # "/b/" survives; "/docs" is no longer reserved (T-0020)
+    assert cfg.public_routes == ["/b/", "/docs"]
 
 
 def test_app_without_web_ui_is_skipped(tmp_path, monkeypatch):

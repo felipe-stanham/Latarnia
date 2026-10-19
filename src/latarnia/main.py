@@ -19,6 +19,7 @@ from latarnia.core.redis_client import RedisHealthMonitor
 from latarnia.core.event_subscriber import AsyncStreamConsumer
 from latarnia.utils.system_monitor import SystemMonitor
 from latarnia.web.dashboard import build_dashboard_router
+from latarnia.web.api_docs import build_api_docs_router
 
 
 # Module-level logger so endpoint handlers can log errors. setup_logging()
@@ -454,7 +455,7 @@ def _require_superuser(request):
 # Create FastAPI app
 app = FastAPI(
     title="Latarnia",
-    description="Unified home automation platform for Raspberry Pi",
+    description="Self-hosted platform for exposing apps",
     version="0.1.0",
     lifespan=lifespan
 )
@@ -478,6 +479,10 @@ app.include_router(auth_router)
 # Include web dashboard routes — built after auth components are wired so
 # _session_user is available to inject is_superuser into the template context.
 app.include_router(build_dashboard_router(session_resolver=_session_user))
+
+# App API docs under the platform's /docs namespace (T-0020): pages at
+# /docs/apps/{app}/{ui|rest}, split schemas at /api/docs/apps/{app}/{ui|rest}.
+app.include_router(build_api_docs_router(app_manager, role_store, _session_user))
 
 
 async def _cleanup_orphaned_apps() -> int:

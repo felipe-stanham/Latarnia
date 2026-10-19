@@ -1,5 +1,5 @@
 """
-Latarnia: Unified home automation platform for Raspberry Pi
+Latarnia: self-hosted platform for exposing apps
 """
 
 __version__ = "0.1.0"
