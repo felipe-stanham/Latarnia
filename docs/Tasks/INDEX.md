@@ -23,3 +23,4 @@
 | [T-0019](T-0019.md) | App tiles show why an App is in warning or error | [DONE] |
 | [T-0020](T-0020.md) | API docs move to the platform's `/docs` namespace, behind login | [DONE] |
 | [T-0021](T-0021.md) | App API responses leak the App's Postgres password | [DONE] |
+| [T-0022](T-0022.md) | Machine Token fixes — superuser 401 on `/api/apps/{id}`, same-second JWT collision | [DONE] |

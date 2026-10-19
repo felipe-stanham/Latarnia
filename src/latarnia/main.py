@@ -694,9 +694,11 @@ async def get_all_apps(request: Request):
         apps = app_manager.registry.get_all_apps()
         payload = []
         for app_entry in apps:
-            if claims is not None and not claims.get("super"):
-                # Machine token: scoped to the apps named in its JWT claim.
-                if claims.get("apps", {}).get(app_entry.name, "none") == "none":
+            if claims is not None:
+                # Machine token: super sees all; otherwise scoped to the apps
+                # named in its JWT claim.
+                if not claims.get("super") and \
+                        claims.get("apps", {}).get(app_entry.name, "none") == "none":
                     continue
             elif not role_store.is_visible(user, app_entry.name):
                 continue
@@ -709,6 +711,8 @@ async def get_all_apps(request: Request):
             "apps": payload,
             "total_count": len(payload)
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -726,8 +730,10 @@ async def get_app(app_id: str, request: Request):
             raise HTTPException(status_code=404, detail=f"App {app_id} not found")
 
         claims = getattr(request.state, "jwt_claims", None)
-        if claims is not None and not claims.get("super"):
-            if claims.get("apps", {}).get(app.name, "none") == "none":
+        if claims is not None:
+            # Machine token: super has full access; otherwise the JWT scope decides.
+            if not claims.get("super") and \
+                    claims.get("apps", {}).get(app.name, "none") == "none":
                 raise HTTPException(status_code=403, detail="Token not scoped to this app")
         else:
             user = _session_user(request)

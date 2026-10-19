@@ -4,6 +4,8 @@ JWT machine-token signing/validation (P-0008 Scope 4).
 HS256 signed with `LATARNIA_JWT_SECRET` (loaded lazily, never logged). Claims:
   sub  - user_id (str)
   iat  - issued-at (unix)
+  jti  - random unique id, so two tokens minted with identical inputs in the
+         same second still differ (machine_tokens.token_hash is UNIQUE)
   exp  - expiry (unix; omitted for never-expiring tokens)
   apps - {app_name: role} scope copied from the machine_tokens record
   super- bool (true => full access to all apps, mirrors the user record)
@@ -15,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import time
+import uuid
 from datetime import datetime
 from typing import Callable, Optional
 
@@ -39,6 +42,7 @@ class JWTAuth:
         payload = {
             "sub": str(user_id),
             "iat": now,
+            "jti": uuid.uuid4().hex,
             "apps": app_scope or {},
             "super": bool(is_super),
         }
