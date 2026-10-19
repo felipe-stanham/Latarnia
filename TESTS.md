@@ -273,6 +273,11 @@ These tests require the Playwright MCP server and a running local dev instance o
 - **test_example_webui_role_header:** `GET http://localhost:8100/` with header `X-Latarnia-App-Role: webUI-low` -> no "Add Item" form. With `full` -> "Add Item" form present and an "Admin" section. No header -> defaults to full (backward compatible).
 - **test_mcp_requires_bearer:** Connect an MCP client to `/mcp/sse` without a Bearer token -> 401. With a valid in-scope token -> tool list scoped to the token's apps; the per-app MCP server receives `X-Latarnia-App-Role`.
 
+### API Docs (T-0020)
+
+- **test_api_docs_not_public:** Anonymous `GET https://{host}/docs`, `/openapi.json` and `/apps/example_full_app/docs`. -> 302 to `/auth/login`, never 200. The generated Caddyfile has no block for `/docs*`, `/openapi.json` or `/apps/{name}/docs*` without `forward_auth`.
+- **test_app_docs_role_gated:** User with `webUI-low` on `example_full_app` -> `GET /api/docs/apps/example_full_app/ui` 200 with only `/api/…` paths and server `/apps/example_full_app`; `/rest` 200 with only `/v1/items` and server `/rest/example_full_app`. Role `none` -> 403 on both pages and schemas. Machine Token scoped to another App -> 403 on `/api/docs/apps/example_full_app/rest`.
+
 ### Deploy Host Pinning
 
 - **test_prd_host_on_main:** After any `main` deploy, `git -C /opt/latarnia/prd rev-parse HEAD` on the homeserver. -> Equals `origin/main`. A mismatch means the run failed or the runner was offline — re-run via **Actions -> Deploy to PRD -> Run workflow**.

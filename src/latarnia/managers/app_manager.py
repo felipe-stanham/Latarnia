@@ -62,8 +62,8 @@ class AppConfig(BaseModel):
     requires_secrets: List[str] = Field(default_factory=list)
     # T-0004: path prefixes served without forward_auth. Validated at parse
     # time — invalid entries are dropped with a WARNING so a typo never
-    # fails the app. Reserved paths (/health, /docs, /openapi.json) are also
-    # rejected. The `/b/` prefix is the platform convention for public bundles.
+    # fails the app. Reserved paths (/health, /openapi.json) are also
+    # rejected — /openapi.json is read by the platform for API docs (T-0020). The `/b/` prefix is the platform convention for public bundles.
     public_routes: List[str] = Field(default_factory=list)
 
     @field_validator("requires_secrets")
@@ -81,7 +81,7 @@ class AppConfig(BaseModel):
     def _validate_public_routes(cls, v: List[str]) -> List[str]:
         import logging as _logging
         _log = _logging.getLogger("latarnia.app_manager")
-        _RESERVED = {"/health", "/docs", "/openapi.json"}
+        _RESERVED = {"/health", "/openapi.json"}
         result: List[str] = []
         for entry in v:
             if not entry:

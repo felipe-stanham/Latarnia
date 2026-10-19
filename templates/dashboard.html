@@ -7,6 +7,7 @@
       <span id="hh-user-chip" class="me-2"></span>
       <button id="hh-api-tokens-btn" class="btn btn-outline-dark btn-sm" style="display:none">🔑 API Tokens</button>
       <button id="hh-users-roles-btn" class="btn btn-outline-dark btn-sm" style="display:none">👥 Users &amp; Roles</button>
+      <a id="hh-api-docs-btn" href="/docs" target="_blank" class="btn btn-outline-dark btn-sm">📘 API docs</a>
       <button id="hh-refresh-all" class="btn btn-outline-primary btn-sm">🔄 Refresh</button>
       {% if is_superuser %}
       <button onclick="viewLatarniaLogs()" class="btn btn-outline-secondary btn-sm">📋 Latarnia Logs</button>
@@ -476,6 +477,7 @@
             <div class="mt-auto d-flex gap-2 flex-wrap">
               ${hasWebUI ? `<a class="btn btn-sm btn-primary" href="/apps/${app.name}/" target="_blank">Web UI</a>` : ''}
               ${hasLegacyUI ? `<button class="btn btn-sm btn-primary" onclick="viewServiceUI('${app.app_id}', '${app.name}')">View UI</button>` : ''}
+              ${app.runtime_info?.assigned_port ? `<span class="hh-api-docs" data-app="${esc(app.name)}" style="display:contents"></span>` : ''}
               <button class="btn btn-sm btn-outline-secondary" onclick="viewAppLogs('${app.app_id}', '${app.name}')">View Logs</button>
               <button class="btn btn-sm btn-outline-primary" onclick="viewAppDetails('${app.app_id}')">Details</button>
             </div>
@@ -483,6 +485,26 @@
         </div>`;
       serviceGrid.appendChild(col);
     }
+    loadApiDocsButtons(serviceGrid);
+  }
+
+  // T-0020: "UI API" / "REST API" buttons on running Service App tiles, shown
+  // only for the docs halves the App actually has. A failed lookup just leaves
+  // the tile without docs buttons.
+  async function loadApiDocsButtons(grid) {
+    await Promise.all([...grid.querySelectorAll(".hh-api-docs")].map(async (slot) => {
+      const name = encodeURIComponent(slot.dataset.app);
+      try {
+        const resp = await fetch(`/api/docs/apps/${name}`);
+        if (!resp.ok) return;
+        const d = await resp.json();
+        slot.innerHTML =
+          (d.ui ? `<a class="btn btn-sm btn-outline-dark" href="/docs/apps/${name}/ui" target="_blank">UI API</a>` : "") +
+          (d.rest ? `<a class="btn btn-sm btn-outline-dark" href="/docs/apps/${name}/rest" target="_blank">REST API</a>` : "");
+      } catch (err) {
+        console.debug("API docs lookup failed for", slot.dataset.app, err);
+      }
+    }));
   }
 
   function renderRecentActivity(activities) {

@@ -56,7 +56,7 @@ you need to see open work; never at session startup.
 
 | Tool        | Config location  | Purpose                                                |
 |-------------|------------------|--------------------------------------------------------|
-| pytest      | `tests/unit/`, `tests/integration/` | Run via `PYTHONPATH=src python3 -m pytest tests/ -q` (486 passed, 1 skipped as of T-0013). **`PYTHONPATH=src` is required** — the package is not installed in the venv and `pytest.ini` is inert (see T-0016); without it collection fails. |
+| pytest      | `tests/unit/`, `tests/integration/` | Run via `PYTHONPATH=src python3 -m pytest tests/ -q` (504 passed, 1 skipped as of T-0020). **`PYTHONPATH=src` is required** — the package is not installed in the venv and `pytest.ini` is inert (see T-0016); without it collection fails. |
 | Playwright MCP | `.mcp.json`  | Browser-level testing for dashboards and web UIs — available as `playwright` MCP server |
 
 MCP servers are configured in `.mcp.json` at the project root.
