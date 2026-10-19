@@ -22,3 +22,4 @@
 | [T-0018](T-0018.md) | Remove the decommissioned Hetzner prd host from workflow + docs | [DONE] |
 | [T-0019](T-0019.md) | App tiles show why an App is in warning or error | [DONE] |
 | [T-0020](T-0020.md) | API docs move to the platform's `/docs` namespace, behind login | [DONE] |
+| [T-0021](T-0021.md) | App API responses leak the App's Postgres password | [DONE] |

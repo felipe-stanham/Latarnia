@@ -237,6 +237,7 @@ These tests require the Playwright MCP server and a running local dev instance o
 ### Database
 
 - **test_example_app_db_provisioned:** Query the API `GET http://localhost:8000/api/apps`. -> The `example_full_app` entry has `database_info.provisioned == true` and `database_info.applied_migrations` contains `["001_initial.sql", "002_add_tags.sql", "003_add_status.sql"]`.
+- **test_api_never_returns_db_password:** Read the `example_full_app` role password from `{env_root}/data/.db_credentials/latarnia_example_full_app_role.json`, then `GET /api/apps` and `GET /api/apps/example_full_app` as a Superuser. -> No response body contains the password; `database_info` has no `connection_url` key but still has `database_name`, `role_name` and `applied_migrations`. (T-0021)
 
 ## Authentication, Roles & Tokens (P-0008)
 
