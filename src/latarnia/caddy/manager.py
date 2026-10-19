@@ -17,10 +17,14 @@ PRD). If the `caddy` binary is unavailable, it falls back to POSTing the
 generated include to the admin API.
 
 Caddyfile structure (see P-0008/architecture.md):
-  - `/auth/*`, `/docs*`, `/openapi.json`   → Latarnia, no auth (public on LAN)
-  - `/apps/{name}/docs*`, `/openapi.json`  → app swagger, no auth (public)
+  - `/auth/*`                              → Latarnia, no auth
+  - `/api/*`, `/mcp/*`                     → Latarnia, auth enforced inside (Bearer JWT or session)
+  - `/apps/{name}/{public_route}*`         → app, no auth, identity headers stripped
   - `/apps/{name}/*`                        → app webUI, forward_auth + proxy
-  - `/*`                                    → dashboard / API / MCP, forward_auth
+  - `/*`                                    → dashboard, `/docs` (API docs), forward_auth
+
+API docs are platform pages under `/docs` (T-0020); an App's `/docs` and
+`/openapi.json` are never published publicly.
 """
 from __future__ import annotations
 
@@ -159,13 +163,6 @@ class CaddyConfigManager:
         lines.append("    handle /auth/* {")
         lines.append(f"        reverse_proxy {local}")
         lines.append("    }")
-        # Public: Latarnia swagger
-        lines.append("    handle /docs* {")
-        lines.append(f"        reverse_proxy {local}")
-        lines.append("    }")
-        lines.append("    handle /openapi.json {")
-        lines.append(f"        reverse_proxy {local}")
-        lines.append("    }")
 
         # Machine-facing surfaces: proxied straight to Latarnia WITHOUT
         # forward_auth. Caddy's forward_auth only validates the session cookie;
@@ -187,22 +184,6 @@ class CaddyConfigManager:
         web_ui_apps = self._web_ui_apps()
         for name, port, pub_routes in web_ui_apps:
             app_local = f"localhost:{port}"
-            # Public: app swagger (no forward_auth). Identity headers stripped
-            # so apps can't be spoofed via the public path (T-0004 hardening).
-            lines.append(f"    handle_path /apps/{name}/docs* {{")
-            lines.append(f"        reverse_proxy {app_local} {{")
-            lines.append("            header_up -X-Latarnia-User")
-            lines.append("            header_up -X-Latarnia-App-Role")
-            lines.append("            header_up -X-Latarnia-Is-Super")
-            lines.append("        }")
-            lines.append("    }")
-            lines.append(f"    handle_path /apps/{name}/openapi.json {{")
-            lines.append(f"        reverse_proxy {app_local} {{")
-            lines.append("            header_up -X-Latarnia-User")
-            lines.append("            header_up -X-Latarnia-App-Role")
-            lines.append("            header_up -X-Latarnia-Is-Super")
-            lines.append("        }")
-            lines.append("    }")
             # Public declared routes (no forward_auth). Caddy's handle (not
             # handle_path) preserves the path matcher, then uri strip_prefix
             # removes /apps/{name} so the app receives its own root-relative
@@ -222,8 +203,9 @@ class CaddyConfigManager:
             lines.append(f"        reverse_proxy {app_local}")
             lines.append("    }")
 
-        # Catch-all: dashboard and any other browser route — behind
-        # forward_auth (session). /api and /mcp were carved out above.
+        # Catch-all: dashboard, API docs (/docs, /openapi.json, /docs/apps/...)
+        # and any other browser route — behind forward_auth (session).
+        # /api and /mcp were carved out above.
         lines.append("    handle /* {")
         lines.extend(self._forward_auth_lines(local))
         lines.append(f"        reverse_proxy {local}")

@@ -521,11 +521,13 @@ sequenceDiagram
     C->>App: GET /dashboard [X-Latarnia-User, X-Latarnia-App-Role headers]
     App-->>Browser: 200 OK HTML
 
-    Note over Browser,App: Public Swagger (no auth check)
+    Note over Browser,App: App's own /docs is an ordinary protected route (no public bypass)
 
-    Browser->>C: GET /apps/crm/docs
+    Browser->>C: GET /apps/crm/docs [Cookie: latarnia_session=abc]
+    C->>AV: GET /auth/verify [X-Forwarded-Uri: /apps/crm/docs]
+    AV-->>C: 200 [role headers]
     C->>App: GET /docs
-    App-->>Browser: 200 OK Swagger UI
+    App-->>Browser: 200 OK
 
     Note over Browser,App: Unauthenticated request
 
@@ -539,10 +541,9 @@ sequenceDiagram
 flowchart TD
     Request([Incoming HTTPS request]) --> RouteMatch{Route match?}
 
-    RouteMatch -- "/auth/* or /docs*" --> PublicLatarnia[Proxy to Latarnia :8000<br/>no auth check]
-    RouteMatch -- "/apps/name/docs* or /openapi.json" --> PublicSwagger[Proxy to App port<br/>no auth check]
+    RouteMatch -- "/auth/*" --> PublicLatarnia[Proxy to Latarnia :8000<br/>no auth check]
     RouteMatch -- "/apps/name/*" --> ForwardAuth[forward_auth to /auth/verify]
-    RouteMatch -- "/* catch-all" --> ForwardAuthCatchAll[forward_auth to /auth/verify]
+    RouteMatch -- "/* catch-all (dashboard, /docs, /openapi.json)" --> ForwardAuthCatchAll[forward_auth to /auth/verify]
 
     ForwardAuth --> AuthOk{/auth/verify response?}
     AuthOk -- 401 --> Deny[Return 401 to browser]
@@ -552,4 +553,44 @@ flowchart TD
     ForwardAuthCatchAll --> AuthOkCatchAll{/auth/verify response?}
     AuthOkCatchAll -- 401 --> DenyCatchAll[Return 401 to browser]
     AuthOkCatchAll -- 200 + headers --> ProxyLatarnia[Proxy to Latarnia :8000 with<br/>X-Latarnia-* headers]
+```
+
+## 14. API Docs Flow (T-0020)
+
+How a logged-in user (or a Machine Token holder) reads an App's UI API and App REST API docs. The docs live in the platform's `/docs` namespace, behind login; an App's own `/docs` is never published. See `src/latarnia/web/api_docs.py`.
+
+```mermaid
+sequenceDiagram
+    participant Browser as User Browser
+    participant C as Caddy
+    participant L as Latarnia :8000<br/>(API Docs router)
+    participant App as Service App<br/>:810x
+
+    Browser->>C: GET /docs/apps/crm/rest [Cookie: latarnia_session]
+    C->>L: forward_auth /auth/verify, then proxy (catch-all)
+    L->>L: role on crm != none? (403 if not, before existence check)
+    L->>App: GET /openapi.json (App's internal port)
+    App-->>L: full OpenAPI schema
+    L->>L: keep /rest/ paths, prune unreferenced components,<br/>servers = /rest/crm
+    L-->>Browser: Swagger UI page
+    Browser->>C: GET /api/docs/apps/crm/rest [session or Bearer Machine Token]
+    C->>L: proxy (no forward_auth; JWTAuthMiddleware authenticates)
+    L->>App: GET /openapi.json
+    L-->>Browser: split OpenAPI schema (UI API: /api/ half, App REST API: /rest/ half)
+```
+
+```mermaid
+flowchart TD
+    Req([GET /docs/apps/name/kind or /api/docs/apps/name/kind]) --> Kind{kind is ui or rest?}
+    Kind -- no --> E404[404]
+    Kind -- yes --> Role{role on App is not none?}
+    Role -- no --> E403[403]
+    Role -- yes --> Exists{Service App registered?}
+    Exists -- no --> E404
+    Exists -- yes --> Fetch[Fetch App /openapi.json from its port]
+    Fetch -- no port or no answer --> E503[503 App not running]
+    Fetch -- ok --> Split[Keep paths under /api/ or /rest/]
+    Split --> Empty{any paths left?}
+    Empty -- no --> E404
+    Empty -- yes --> Out[Prune components, rewrite servers,<br/>return page or schema]
 ```
