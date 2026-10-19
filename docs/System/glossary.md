@@ -20,6 +20,13 @@ This file is the single source of truth for domain vocabulary across this projec
 
 ---
 
+### App User
+
+**Definition:** A platform user that the platform creates and owns on behalf of an App that consumes other Apps' App REST APIs. It identifies that App as the caller, cannot log in, and is removed together with the App.
+**Not to be confused with:** A person's platform user, which logs in with TOTP and is managed by the superuser.
+
+---
+
 ### Health Check
 
 **Definition:** An HTTP GET probe sent by the platform's Health Monitor to an App's `/health` endpoint, which must return one of `good`, `warning`, or `error`. Service Apps must implement this endpoint; the platform uses the result to determine overall app status and MCP tool availability.
