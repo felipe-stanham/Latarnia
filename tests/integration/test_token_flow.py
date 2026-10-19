@@ -170,3 +170,26 @@ def test_session_cookie_also_authorizes_gated_endpoint(ctx):
     _bob, bob_token = ctx["make_user"]("bob")
     client.cookies.clear()
     assert client.get("/api/ping", cookies={COOKIE: bob_token}).status_code == 200
+
+
+def test_identical_same_second_mints_both_succeed(ctx, monkeypatch):
+    # T-0022 (t22-006): identical inputs in the same second used to produce the
+    # same JWT, failing UNIQUE(token_hash) with a 500. `jti` makes each distinct.
+    from types import SimpleNamespace
+    import latarnia.auth.jwt_auth as jwt_auth_module
+    monkeypatch.setattr(jwt_auth_module, "time", SimpleNamespace(time=lambda: 1_760_000_000))
+    client = ctx["client"]
+    admin, admin_token = ctx["make_user"]("admin", is_superuser=True)
+    raws = []
+    for _ in range(2):
+        client.cookies.clear()
+        r = client.post("/api/auth/tokens",
+                        json={"label": "twin", "app_scope": {"app_a": "full"}},
+                        cookies={COOKIE: admin_token})
+        assert r.status_code == 200
+        raws.append(r.json()["token"])
+    assert raws[0] != raws[1]
+    assert ctx["jwt"].token_hash(raws[0]) != ctx["jwt"].token_hash(raws[1])
+    client.cookies.clear()
+    listing = client.get("/api/auth/tokens", cookies={COOKIE: admin_token}).json()["tokens"]
+    assert sum(t["label"] == "twin" for t in listing) == 2
