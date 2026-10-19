@@ -140,7 +140,7 @@ erDiagram
         bool provisioned
         string database_name
         string role_name
-        string connection_url
+        string connection_url "in-memory only; never serialized (excluded from to_dict and API responses)"
         list applied_migrations
         datetime last_migration_at
     }

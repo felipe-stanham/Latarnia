@@ -225,7 +225,7 @@ graph TB
   - Run pending migrations from the app's `migrations/*.sql` directory in numeric order, in a single transaction; record file name + sha256 checksum + duration.
   - Drop database + role on initial provisioning failure (clean slate) — but preserve them on version-bump migration failure.
   - Grant `ALL PRIVILEGES ON ALL TABLES / SEQUENCES IN SCHEMA public` to the per-app role after migrations so the app can use objects created by the superuser.
-  - Build the connection URL passed to apps via `--db-url env:DATABASE_URL` + `Environment=DATABASE_URL=...` in the systemd unit.
+  - Build the connection URL passed to apps via `--db-url env:DATABASE_URL` + `Environment=DATABASE_URL=...` in the systemd unit. The URL (`DatabaseInfo.connection_url`) carries the App role password, so it is held in memory only: `DatabaseInfo.to_dict()` omits it (no App API response includes it) and it is `repr=False` on `DatabaseInfo` and `ProvisioningResult`. Only the Service Manager and Subprocess Launcher read it, to inject `DATABASE_URL`.
 - **Extensions list (`DEFAULT_EXTENSIONS`)**: append-only, hardcoded today. `vector` was added for embeddings / RAG / semantic search. Adding more (postgis, citext, etc.) is a one-line edit; if per-app extension overrides ever become needed, refactor to manifest-driven at that point.
 
 ### 10. Secret Manager

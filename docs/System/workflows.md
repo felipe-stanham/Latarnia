@@ -214,7 +214,7 @@ flowchart TD
     QueryApplied --> Pending{Pending migrations?}
 
     Pending -- None --> BuildURL[Build connection_url for app]
-    BuildURL --> StoreInfo[Store DatabaseInfo in registry<br/>database_name, role_name, connection_url, applied_migrations]
+    BuildURL --> StoreInfo[Store DatabaseInfo in registry<br/>database_name, role_name, connection_url - in-memory only, never in API responses -, applied_migrations]
     StoreInfo --> Done([Return ProvisioningResult success])
 
     Pending -- Yes --> RunTx[BEGIN transaction on app DB]

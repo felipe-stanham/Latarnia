@@ -165,12 +165,16 @@ class DatabaseInfo:
     provisioned: bool = False
     database_name: Optional[str] = None
     role_name: Optional[str] = None
-    connection_url: Optional[str] = None
+    # Carries the App role's password. In-memory only: the launchers read it
+    # to inject DATABASE_URL; never serialized or repr'd (T-0021).
+    connection_url: Optional[str] = field(default=None, repr=False)
     applied_migrations: List[str] = field(default_factory=list)
     last_migration_at: Optional[datetime] = None
 
     def to_dict(self) -> dict:
         data = asdict(self)
+        # Every App API response is built from this dict (T-0021).
+        data.pop('connection_url', None)
         if self.last_migration_at:
             data['last_migration_at'] = self.last_migration_at.isoformat()
         return data
