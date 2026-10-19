@@ -10,7 +10,7 @@ A pitch ends in one of three ways: promoted to a Task, promoted to a Project, or
 
 ## Open
 
-_None._
+- [I-0002](I-0002.md) — App REST API — publish each App's machine-facing API at `/rest/{app}/` behind Machine Tokens, with per-App role forwarding and authenticated docs — 2026-10-18
 
 ---
 
