@@ -1,0 +1,54 @@
+# Template-owned files, relative to the project root. Managed by template-sync — do not edit.
+# Plain lines are overwritten on every sync and deleted when the template drops them.
+# "seed <path>" lines are copied only if missing: the project customizes them afterwards.
+# Template maintainers: regenerate with the command in the repo CLAUDE.md ("Manifest").
+.claude/agents/README.md
+.claude/agents/code-reviewer.md
+.claude/agents/doc-updater.md
+.claude/agents/docs-audit.md
+.claude/agents/implementer.md
+.claude/agents/tester.md
+.claude/hooks/post-tool/dispatcher.sh
+.claude/hooks/post-tool/template/00-dispatch-shim.sh
+.claude/hooks/pre-tool/dispatcher.sh
+.claude/hooks/pre-tool/template/00-dispatch-shim.sh
+.claude/hooks/pre-tool/template/01-check-docs-before-push.sh
+.claude/hooks/pre-tool/template/02-protected-branch.sh
+.claude/hooks/pre-tool/template/03-no-secrets.sh
+.claude/hooks/pre-tool/template/04-task-before-code.sh
+.claude/hooks/pre-tool/template/05-arch-check-before-push.sh
+.claude/hooks/pre-tool/template/lib/common.sh
+.claude/hooks/pre-tool/template/lib/dispatch.sh
+.claude/hooks/session-start/dispatcher.sh
+.claude/hooks/session-start/template/00-dispatch-shim.sh
+.claude/hooks/session-start/template/01-template-update-check.sh
+.claude/hooks/stop/dispatcher.sh
+.claude/hooks/stop/template/00-dispatch-shim.sh
+.claude/skills/README.md
+.claude/skills/arch-check/SKILL.md
+seed .claude/skills/deployment-process/SKILL.md
+.claude/skills/glossary/SKILL.md
+.claude/skills/pitch/SKILL.md
+.claude/skills/share/SKILL.md
+.claude/skills/spec/SKILL.md
+.claude/skills/system-map/SKILL.md
+.claude/skills/system-map/kit/build.py
+.claude/skills/system-map/kit/facts.py
+.claude/skills/system-map/kit/figures.py
+.claude/skills/system-map/kit/page.py
+.claude/skills/system-map/kit/sections.py
+.claude/skills/system-map/kit/svgkit.py
+.claude/skills/task/SKILL.md
+.claude/skills/template-sync/CHANGELOG.md
+.claude/skills/template-sync/MIGRATIONS.md
+.claude/skills/template-sync/SKILL.md
+.githooks/pre-commit
+docs/templates/GLOSSARY.template.md
+docs/templates/PITCH_INDEX.template.md
+docs/templates/PROJECT_INDEX.template.md
+docs/templates/SYSTEM.template.md
+docs/templates/TASK.template.md
+docs/templates/TASK_INDEX.template.md
+docs/templates/TESTS.template.md
+docs/templates/ci-arch-check.template.yml
+docs/templates/deploy-secrets.template.md

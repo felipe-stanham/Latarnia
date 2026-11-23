@@ -25,11 +25,28 @@
 
 - [Constraint that applies to every project, e.g., "All auth uses JWT via auth-service"]
 
+## Architecture Invariants
+
+Rules the code must never break, and what enforces each one. Checks run from
+`.claude/arch-check.sh` (before every push, and in CI). Use the `arch-check` skill to add one.
+
+| # | Invariant | Enforced by | Mechanism |
+|---|-----------|-------------|-----------|
+| 1 | [e.g., "domain/ never imports from infrastructure/"] | [e.g., import-linter contract `domain-independent`] | `.claude/arch-check.sh` |
+<!-- A row with an empty "Enforced by" is a wish, not an invariant. Delete this table if the project has none yet. -->
+<!-- With a system map (`system-map` skill), add: | n | The system map matches the code | `python3 docs/System/map/build.py --check` | `.claude/arch-check.sh` | -->
+
 ## Subsystems / Components
 
 - [Named subsystem 1] — [one-line description]
 - [Named subsystem 2] — [one-line description]
 <!-- This list is what the "touches multiple subsystems" promotion trigger checks against. Keep names stable. -->
+
+## System Docs
+
+- [System map](System/map/index.html) — generated from the code, open in a browser ([Markdown](System/map.md)). Set up with the `system-map` skill; delete this line until then.
+- [Architecture](System/architecture.md) · [Workflows](System/workflows.md) · [Data model](System/dataModel.md) · [Glossary](System/glossary.md)
+<!-- Point to the source or the map for anything the code defines (versions, lists, allowed values) — do not copy it here. -->
 
 ## Logging
 

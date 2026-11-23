@@ -42,7 +42,13 @@ The glossary is the single source of truth. If a term is in the glossary, every 
 - During implementation, code or docs use a word that doesn't match the glossary — you suspect drift.
 - Two artifacts use different words for what looks like the same concept.
 
-If invoked from another skill (`pitch`, `spec`), treat its current draft as the source of new candidate terms.
+If invoked from another skill (`pitch`, `task`, `spec`), treat its current draft as the source of new candidate terms.
+
+### Where changes are committed
+
+The glossary is a planning artifact: it is committed on `dev` in the primary checkout.
+- **Invoked from `pitch`, `task` or `spec`** — leave the change uncommitted; the calling skill commits it with its artifact.
+- **Invoked directly** — before editing, run `git branch --show-current` and `git rev-parse --git-dir --git-common-dir`; continue only on `dev` with both paths equal (not a worktree). After the edit: `git add docs/System/glossary.md && git commit -m "docs(glossary): <add|edit|remove> <Term>" && git push`.
 
 ---
 
@@ -154,6 +160,7 @@ Keep the file under ~200 lines. If it grows beyond that, the glossary is doing t
 ## Integration with Other Skills
 
 - **`pitch`** — When a pitch introduces domain terms, propose adding them to the glossary before writing the pitch document. Drift detected during pitch interrogation invokes Mode B.
+- **`task`** — Same as `pitch`: new terms in a task's Goal, Tasks, or Acceptance Criteria are added before the task is written.
 - **`spec`** — When producing a spec package, the canonical terms from the glossary must be used in `spec.md`, `data_model.md`, `workflows.md`, and `architecture.md`. If a spec introduces a term not in the glossary, pause and add it before continuing.
 - **Implementation** — Code identifiers should mirror glossary terms (allowing for language-idiomatic casing). The `code-reviewer` agent may flag drift; this skill is the resolution point.
 

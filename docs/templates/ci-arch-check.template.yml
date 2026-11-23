@@ -1,0 +1,22 @@
+# Seed for .github/workflows/arch-check.yml — runs the same .claude/arch-check.sh the
+# pre-push hook runs, so invariants hold even for pushes made outside Claude Code.
+# Setup: copy to .github/workflows/arch-check.yml, fill in the setup step for your stack,
+# and delete these comment lines. See the `arch-check` skill for per-stack recipes.
+name: arch-check
+
+on:
+  pull_request:
+  push:
+    branches: [dev, tst, main]
+
+jobs:
+  arch-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # [Setup for your stack, e.g. actions/setup-python@v5 + `pip install -r requirements-dev.txt`,
+      #  or actions/setup-node@v4 + `npm ci`]
+
+      - name: Run architecture check
+        run: ./.claude/arch-check.sh
