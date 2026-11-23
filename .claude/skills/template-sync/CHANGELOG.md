@@ -9,6 +9,20 @@ heading per release, matching line 1 of `CLAUDE.md`.
 
 ---
 
+## 1.3.0 — 2026-11-23
+
+- **Worktrees inside the repo**, in `.claude/worktrees/<branch>` (gitignored), instead of a sibling
+  folder: no more permission prompts or denied commands when working on a task. One manual step: add
+  `.claude/worktrees/` to `.gitignore` and move open worktrees (see `MIGRATIONS.md`).
+- Worktrees and their branches are removed when the branch merges into `dev`.
+- The secrets gate denies commits while `.claude/worktrees/` exists and is not gitignored.
+
+## 1.2.1 — 2026-11-23
+
+- **Template version at session start.** The startup confirmation line now ends with the template version
+  this project uses (`· ClaudeCodeTemplate v1.2.1`), passed in by the session-start hook. It shows even with
+  the update check turned off.
+
 ## 1.2.0 — 2026-11-23
 
 - **Update check at session start.** A new `session-start` hook compares this project's template version

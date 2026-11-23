@@ -5,6 +5,24 @@ Breaking changes per major version: what changes for an existing project, and an
 
 ---
 
+## 1.3.0 (minor — one manual step)
+
+- **Worktrees move into the repo:** `.claude/worktrees/<branch>` instead of `../<repo>-wt/<branch>`. The old
+  sibling folder was outside the session's folder, so edits and commands there needed extra permissions.
+  `.claude/worktrees/` is inside it, and Claude Code does not treat it as a protected path.
+- **Worktrees are removed when the branch merges** (Promotion Flow step 1), together with the branch.
+- **Secrets gate (`03`)**: once `.claude/worktrees/` exists, `git add` / `git commit` are denied until it is
+  gitignored.
+
+Manual steps:
+
+- Add `.claude/worktrees/` to `.gitignore` (and to `.dockerignore` if the project has one), on `dev`.
+- Move each open worktree: `git worktree move ../<repo>-wt/<branch> .claude/worktrees/<branch>` (needs git
+  2.17+; a worktree with submodules has to be removed and re-added instead). Then delete the empty
+  `../<repo>-wt/` folder and drop it from `permissions.additionalDirectories` if you added it there.
+
+---
+
 ## 1.2.0 (minor — no manual step required)
 
 - New **`session-start`** hook type (`.claude/hooks/session-start/`, with its own `dispatcher.sh` stub and
@@ -53,7 +71,7 @@ What changes:
   `task-T-xxxx-*` branch. Hotfixes are task branches from `main`/`tst`.
 - **Checkout model.** The primary checkout stays on `dev` and is for planning; pitches, tasks, specs and
   the glossary are committed and pushed there as they are written. Code is written in a worktree per
-  task/scope branch (`../<repo>-wt/<branch>`).
+  task/scope branch (`.claude/worktrees/<branch>` since 1.3.0).
 - **The main session no longer writes code.** The new `implementer` agent does, inside the Execution Loop
   (implementer → code-reviewer → tester → doc-updater → one commit). `code-reviewer` and `tester` now run
   on Opus.
@@ -73,12 +91,10 @@ Manual steps:
 - Make sure `.gitignore` contains `.env`, `.deploy-secrets`, and `docs/local/` — otherwise every
   `git add`/`git commit` is denied.
 - If you work on code directly in the primary checkout, move it to a worktree:
-  `git worktree add ../<repo>-wt/<branch> <branch>`, then `git checkout dev` in the primary checkout.
+  `git worktree add .claude/worktrees/<branch> <branch>`, then `git checkout dev` in the primary checkout.
 - The template folder is `docs/templates/` (lowercase). On macOS a project folder named `docs/Templates/`
   works by accident (case-insensitive file system) but becomes a second folder on Linux:
   `git mv docs/Templates docs/templates-tmp && git mv docs/templates-tmp docs/templates`.
-- Code worktrees live in `../<repo>-wt/`, outside the session folder, where some commands (`chmod`) can be
-  denied: add that directory to the session's folders or to `permissions.additionalDirectories` in
-  `.claude/settings.local.json`.
+- Code worktrees: since 1.3.0 they live in `.claude/worktrees/` — see the 1.3.0 entry.
 - If a project hook relied on being sourced (shared variables, `exit` ending the dispatcher), rewrite it
   for the subprocess contract above.

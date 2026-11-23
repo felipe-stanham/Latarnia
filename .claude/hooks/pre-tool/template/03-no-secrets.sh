@@ -1,6 +1,7 @@
 #!/bin/bash
 # Secrets gate: on `git add` / `git commit`, deny when .env, .deploy-secrets or docs/local/
-# are not gitignored, are tracked, are staged, or are being force-added.
+# are not gitignored, are tracked, are staged, or are being force-added — and when
+# .claude/worktrees/ exists but is not gitignored (git would commit each worktree as an embedded repo).
 # *.example files (e.g. .env.example) are allowed.
 . "$(dirname "$0")/lib/common.sh"
 
@@ -16,6 +17,10 @@ for path in .env .deploy-secrets docs/local/notes; do
     PROBLEMS="$PROBLEMS- ${path%/notes} is not in .gitignore"$'\n'
   fi
 done
+
+if [ -d "$ROOT/.claude/worktrees" ] && ! git -C "$ROOT" check-ignore -q --no-index .claude/worktrees/x; then
+  PROBLEMS="$PROBLEMS- .claude/worktrees/ is not in .gitignore (it holds the code worktrees)"$'\n'
+fi
 
 TRACKED="$(git -C "$ROOT" ls-files | grep -E "$SECRET_PATHS")"
 [ -n "$TRACKED" ] && PROBLEMS="$PROBLEMS- tracked by git (remove with: git rm --cached <file>): $(echo $TRACKED)"$'\n'
@@ -33,5 +38,5 @@ if hook_runs_git add; then
 fi
 
 [ -z "$PROBLEMS" ] && exit 0
-deny "secrets must never be committed:
+deny "secrets and worktrees must never be committed:
 $PROBLEMS"

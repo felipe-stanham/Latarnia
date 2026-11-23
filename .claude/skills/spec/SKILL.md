@@ -97,7 +97,7 @@ git add docs/
 git commit -m "docs(projects): add P-xxxx <project name>"
 git push
 ```
-Then tell the user how to start the first scope: `git worktree add ../<repo>-wt/scope-P-xxxx-1-<desc> -b scope-P-xxxx-1-<desc> dev`. The Execution Loop in CLAUDE.md runs from that worktree.
+Then tell the user how to start the first scope: `git worktree add .claude/worktrees/scope-P-xxxx-1-<desc> -b scope-P-xxxx-1-<desc> dev`. The Execution Loop in CLAUDE.md runs from that worktree.
 
 ---
 

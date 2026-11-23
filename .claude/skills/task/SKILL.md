@@ -112,7 +112,7 @@ git push
 Tell the user the task is ready and how to start it:
 
 ```bash
-git worktree add ../<repo>-wt/task-T-xxxx-<short-description> -b task-T-xxxx-<short-description> dev
+git worktree add .claude/worktrees/task-T-xxxx-<short-description> -b task-T-xxxx-<short-description> dev
 ```
 
 (For a hotfix, replace the final `dev` with `main` or `tst`.) The Execution Loop in CLAUDE.md runs from

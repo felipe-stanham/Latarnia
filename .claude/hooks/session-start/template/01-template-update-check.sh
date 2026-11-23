@@ -1,19 +1,23 @@
 #!/bin/bash
-# Template update check — at session start, tells Claude when a newer ClaudeCodeTemplate is out,
-# with the release notes since this project's version, so it can offer `template-sync`.
+# Template version + update check — at session start, tells Claude which ClaudeCodeTemplate version
+# this project uses (Claude never sees the HTML comment on line 1 of CLAUDE.md), and when a newer one
+# is out, with the release notes since this project's version, so it can offer `template-sync`.
 # Never changes the project. Silent when current, offline, or slow (2 s cap); fetches at most once a
 # day per machine (cache in ~/.cache/claude-code-template/). Managed by template-sync — do not edit.
 #
-# Opt out per project or machine: CLAUDE_TEMPLATE_UPDATE_CHECK=0 (e.g. in the "env" of
-# .claude/settings.local.json). CLAUDE_TEMPLATE_CHANGELOG_URL overrides the source (tests, forks).
+# Opt out of the update check (the version line stays) per project or machine:
+# CLAUDE_TEMPLATE_UPDATE_CHECK=0 (e.g. in the "env" of .claude/settings.local.json).
+# CLAUDE_TEMPLATE_CHANGELOG_URL overrides the source (tests, forks).
 
-[ "${CLAUDE_TEMPLATE_UPDATE_CHECK:-1}" = 0 ] && exit 0
 # Only new conversations: a resumed or compacted session has already been told.
 case "${HOOK_SOURCE:-startup}" in startup|clear) ;; *) exit 0 ;; esac
 
 ROOT="${CLAUDE_PROJECT_DIR:-${HOOK_CWD:-$PWD}}"
 LOCAL=$(head -5 "$ROOT/CLAUDE.md" 2>/dev/null | sed -nE 's/.*TEMPLATE VERSION: ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' | head -1)
 [ -n "$LOCAL" ] || exit 0
+echo "ClaudeCodeTemplate version in use: v$LOCAL"
+
+[ "${CLAUDE_TEMPLATE_UPDATE_CHECK:-1}" = 0 ] && exit 0
 
 URL="${CLAUDE_TEMPLATE_CHANGELOG_URL:-https://raw.githubusercontent.com/felipe-stanham/ClaudeCodeTemplate/main/Template/.claude/skills/template-sync/CHANGELOG.md}"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/claude-code-template"
