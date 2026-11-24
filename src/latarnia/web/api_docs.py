@@ -216,7 +216,8 @@ def build_api_docs_router(app_manager, role_store, session_resolver: Callable) -
         except HTTPException as exc:
             return HTMLResponse(_error_page(app_name, exc.detail), status_code=exc.status_code)
         # get_swagger_ui_html interpolates both values unescaped (the URL into a
-        # JS string), and manifest names have no character pattern.
+        # JS string). Manifest names now match APP_NAME_PATTERN, but app_name is
+        # still a request path parameter, so keep the escaping as defence in depth.
         return get_swagger_ui_html(
             openapi_url=f"/api/docs/apps/{quote(app_name, safe='')}/{kind}",
             title=escape(f"{app_name} — {DOC_TITLES[kind]}"),

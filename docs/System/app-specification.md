@@ -33,7 +33,7 @@ Each app must include a `latarnia.json` file in its root directory:
 
 ```json
 {
-  "name": "Camera Detection",
+  "name": "camera_detection",
   "version": "1.0.0",
   "description": "Detects motion in camera feeds and publishes events",
   "type": "service",
@@ -66,7 +66,7 @@ Each app must include a `latarnia.json` file in its root directory:
 #### Manifest Field Definitions
 
 ##### Required Fields
-- **name**: Display name for the app
+- **name**: App identifier (also its registry key). Lowercase letters, digits, `_`, `-`; starts with a letter; max 50 characters. Source of truth: `APP_NAME_PATTERN` in `src/latarnia/managers/app_manager.py`. An App whose name does not match is not registered and an ERROR `Invalid manifest in <path>` is logged. Use `description` for human-readable text.
 - **version**: Semantic version (x.y.z)
 - **description**: Brief description of app functionality
 - **type**: `"service"` or `"streamlit"`
@@ -403,7 +403,7 @@ Apps should declare the events they publish and subscribe to in their `latarnia.
 **Example**:
 ```json
 {
-  "name": "Camera Detection",
+  "name": "camera_detection",
   "events": {
     "publishes": [
       {
@@ -700,7 +700,7 @@ my_sensor_app/
 **latarnia.json**:
 ```json
 {
-  "name": "Temperature Monitor",
+  "name": "temperature_monitor",
   "version": "1.0.0",
   "description": "Monitors temperature and publishes alerts",
   "type": "service",
@@ -998,7 +998,7 @@ To enable MCP, set `mcp_server` to `true` in the `config` section of your `latar
 
 ```json
 {
-  "name": "My MCP App",
+  "name": "my_mcp_app",
   "version": "1.0.0",
   "type": "service",
   "config": {

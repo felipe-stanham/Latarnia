@@ -22,6 +22,11 @@ from ..core.config import ConfigManager
 from .port_manager import PortManager
 
 
+# A Manifest `name` is an identifier: the platform interpolates it into the Caddyfile
+# (path and `X-Latarnia-App` header), Postgres names, log lines and docs pages.
+APP_NAME_PATTERN = r"^[a-z][a-z0-9_-]{0,49}$"
+
+
 class AppType(str, Enum):
     """Application types supported by Latarnia"""
     SERVICE = "service"
@@ -113,7 +118,7 @@ class ManifestDependency(BaseModel):
 
 class AppManifest(BaseModel):
     """Application manifest schema (latarnia.json)"""
-    name: str = Field(..., min_length=1, max_length=50)
+    name: str = Field(..., min_length=1, max_length=50, pattern=APP_NAME_PATTERN)
     type: AppType
     description: str = Field(..., min_length=1, max_length=200)
     version: str = Field(..., pattern=r'^\d+\.\d+\.\d+$')
