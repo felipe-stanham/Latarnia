@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 from latarnia.auth import AuthDB
 from latarnia.auth.jwt_auth import JWTAuth
 from latarnia.auth.providers import TOTPAuthProvider
+from latarnia.auth.roles import RoleStore
 from latarnia.auth.routes import build_auth_router
 from latarnia.auth.sessions import SessionStore
 from latarnia.auth.tokens import MachineTokenStore
@@ -51,16 +52,17 @@ def ctx(monkeypatch):
     totp = TOTPAuthProvider(db, lambda: totp_key, issuer="Test")
     jwt_auth = JWTAuth(lambda: jwt_secret)
     token_store = MachineTokenStore(db, jwt_auth)
+    roles = RoleStore(db, users)
     app = FastAPI()
     app.include_router(
-        build_auth_router(db, users, sessions, totp, cfg,
+        build_auth_router(db, users, sessions, totp, cfg, role_store=roles,
                          jwt_auth=jwt_auth, token_store=token_store)
     )
     client = TestClient(app, follow_redirects=False)
 
     yield {
         "client": client, "db": db, "users": users, "totp": totp,
-        "token_store": token_store, "pg": pg,
+        "token_store": token_store, "pg": pg, "sessions": sessions, "roles": roles,
     }
 
     pg.drop_database(TEST_DB)
@@ -147,9 +149,9 @@ def test_login_unknown_user_rejected(ctx):
 
 def test_verify_with_and_without_session(ctx):
     _user, _secret, token = _complete_first_setup(ctx)
-    # Valid session for an app path -> 200 with headers.
+    # Valid session for an App (named by Caddy) -> 200 with headers.
     r = ctx["client"].get("/auth/verify",
-                          headers={"X-Forwarded-Uri": "/apps/my_app/page"},
+                          headers={"X-Latarnia-App": "my_app"},
                           cookies={COOKIE: token})
     assert r.status_code == 200
     assert r.headers["X-Latarnia-Is-Super"] == "true"
@@ -158,6 +160,83 @@ def test_verify_with_and_without_session(ctx):
     # No cookie -> 401.
     ctx["client"].cookies.clear()
     assert ctx["client"].get("/auth/verify").status_code == 401
+
+
+def _member_session(ctx, username="carol"):
+    """An active non-superuser with a live session cookie."""
+    user, _ = ctx["users"].create_user(username)
+    ctx["users"].activate_user(user["id"])
+    return user, ctx["sessions"].create_session(user["id"])
+
+
+def _verify(ctx, token, app=None, extra=None):
+    """GET /auth/verify as Caddy does: `X-Latarnia-App` names the App (or is absent)."""
+    headers = dict(extra or {})
+    if app is not None:
+        headers["X-Latarnia-App"] = app
+    ctx["client"].cookies.clear()
+    return ctx["client"].get("/auth/verify", headers=headers, cookies={COOKIE: token})
+
+
+def test_verify_rejects_role_none_on_app(ctx):
+    # t23-001: role `none` on the App -> 403, plain body, no identity headers.
+    _user, token = _member_session(ctx)
+    r = _verify(ctx, token, "my_app")
+    assert r.status_code == 403
+    assert r.text == "No access to this app"
+    assert not [h for h in r.headers if h.lower().startswith("x-latarnia-")]
+
+
+def test_verify_allows_granted_role_on_app(ctx):
+    # t23-002: same user once granted `webUI-low` -> 200 with the role header.
+    user, token = _member_session(ctx)
+    assert _verify(ctx, token, "my_app").status_code == 403
+    ctx["roles"].set_role(user["id"], "my_app", "webUI-low", granted_by=user["id"])
+    r = _verify(ctx, token, "my_app")
+    assert r.status_code == 200
+    assert r.headers["X-Latarnia-App-Role"] == "webUI-low"
+    assert r.headers["X-Latarnia-Is-Super"] == "false"
+    # A role on another App does not open this one.
+    assert _verify(ctx, token, "other_app").status_code == 403
+
+
+def test_verify_superuser_gets_full_on_app(ctx):
+    # t23-003
+    _user, _secret, token = _complete_first_setup(ctx)
+    r = _verify(ctx, token, "my_app")
+    assert r.status_code == 200
+    assert r.headers["X-Latarnia-App-Role"] == "full"
+    assert r.headers["X-Latarnia-Is-Super"] == "true"
+
+
+def test_verify_without_app_header_unaffected_by_role_none(ctx):
+    # t23-004: no X-Latarnia-App (dashboard, /docs, ...) -> 200 for a user with no roles.
+    _user, token = _member_session(ctx)
+    r = _verify(ctx, token)
+    assert r.status_code == 200
+    assert r.headers["X-Latarnia-App-Role"] == "none"
+    assert r.headers["X-Latarnia-Is-Super"] == "false"
+    # An empty header is the same as no header.
+    assert _verify(ctx, token, "").status_code == 200
+
+
+def test_verify_does_not_read_the_uri(ctx):
+    # t23-004: an App path in X-Forwarded-Uri without X-Latarnia-App is not an
+    # App check — verify reads the App only from X-Latarnia-App.
+    _user, token = _member_session(ctx)
+    r = _verify(ctx, token, extra={"X-Forwarded-Uri": "/apps/my_app/page"})
+    assert r.status_code == 200
+    assert r.headers["X-Latarnia-App-Role"] == "none"
+    # ...and a non-App URI does not lift the check when Caddy names the App.
+    r = _verify(ctx, token, "my_app", extra={"X-Forwarded-Uri": "/dashboard"})
+    assert r.status_code == 403
+
+
+def test_verify_without_cookie_is_401_for_app(ctx):
+    # t23-005
+    ctx["client"].cookies.clear()
+    r = ctx["client"].get("/auth/verify", headers={"X-Latarnia-App": "my_app"})
+    assert r.status_code == 401
 
 
 def test_logout_invalidates_session(ctx):

@@ -254,7 +254,7 @@ These tests require the Playwright MCP server and a running local dev instance o
 ### Login & Session
 
 - **test_totp_login:** `POST /auth/login` with username `admin` + a valid 6-digit code. -> 302/303 with `latarnia_session` cookie. Replaying the same code within its 30s window -> rejected.
-- **test_verify_headers:** `GET /auth/verify` with a valid session cookie and `X-Forwarded-Uri: /apps/example_full_app/`. -> 200 with `X-Latarnia-User`, `X-Latarnia-App-Role`, `X-Latarnia-Is-Super`. Without a cookie -> 401.
+- **test_verify_headers:** `GET /auth/verify` with a valid session cookie and `X-Latarnia-App: example_full_app` (the header Caddy's `/apps/example_full_app/*` `forward_auth` block sends). -> For a superuser, or a user with a role other than `none` on `example_full_app`: 200 with `X-Latarnia-User`, `X-Latarnia-App-Role`, `X-Latarnia-Is-Super`. For a user with role `none` on it: 403 `No access to this app` with no `X-Latarnia-*` headers (T-0023). No `X-Latarnia-App` (non-App paths such as the dashboard; the URI is not read) -> 200 for any valid session. Without a cookie -> 401.
 - **test_dev_totp_bypass_is_dev_only (T-0010):** Build the auth gate with `ENV=tst` and `LATARNIA_DEV_TOTP_BYPASS=1`. -> `dev_totp_bypass_enabled()` returns `False` and the secrets loader is never called; same for `ENV=prd`. With `ENV=dev` + the flag, `POST /auth/login` with username `admin` and code `000000` -> 303 with a `latarnia_session` cookie; without the flag the same request -> 401. An unknown or inactive username -> 401 even with the bypass active.
 - **test_login_is_case_insensitive (P-0011):** With the superuser enrolled as `admin`, `POST /auth/login` with username `ADMIN` + a valid 6-digit code. -> 303 to `/dashboard` with a `latarnia_session` cookie. `POST /api/auth/users` `{"username":"ADMIN"}` as a superuser -> 409 `username already exists`, and `SELECT username FROM users` never contains an uppercase character.
 
@@ -262,6 +262,8 @@ These tests require the Playwright MCP server and a running local dev instance o
 
 - **test_dashboard_tile_role_filtering:** As a non-superuser with role `none` for `example_full_app`, load `/dashboard` (GET `/api/apps`). -> The `example_full_app` tile is absent. Grant `webUI-low` -> tile appears on next load with a role badge.
 - **test_assign_full_requires_superuser:** `POST /api/auth/roles/example_full_app` `{"role":"full","user_id":...}` as a non-superuser -> 403; as a superuser -> 200.
+- **test_live_none_role_blocked_at_ingress:** (T-0023, live on tst after deploy) Non-superuser with role `none` on `example_full_app` -> `GET https://<tst>/apps/example_full_app/` with their session -> 403 (not the page, not a login redirect). Run by `tests/cache/regression_live.sh` when `INGRESS` is set.
+- **test_live_role_reaches_app_webui:** (T-0023, live on tst after deploy) Same user granted `webUI-low` -> `GET https://<tst>/apps/example_full_app/` -> 200 and the page has no "Add Item" form (role `webUI-low` reached the App through Caddy). Granted `webUI-full` -> "Add Item" present. With `webUI-low`, the same request over `curl --http1.1` with `Connection: close, X-Latarnia-App-Role, X-Latarnia-User, X-Latarnia-Is-Super` -> still 200, the page shows role `webUI-low` and no "Add Item" (a client `Connection` header cannot strip the identity headers). (The check against the App port with a hand-set header does not prove this.) Run by `tests/cache/regression_live.sh` when `INGRESS` is set.
 
 ### Machine Tokens
 

@@ -349,7 +349,9 @@ from .auth.dev_bypass import (
 from .auth.jwt_auth import JWTAuth
 from .auth.tokens import MachineTokenStore
 from .auth.middleware import JWTAuthMiddleware
-from .auth.routes import build_auth_router, resolve_session_user, require_superuser
+from .auth.routes import (
+    build_auth_router, resolve_session_user, require_superuser, H_USER, H_ROLE, H_SUPER,
+)
 
 
 def _load_platform_secret(name: str) -> Optional[str]:
@@ -717,6 +719,45 @@ async def get_all_apps(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _app_access_headers(request: Request, app_name: str) -> dict:
+    """Resolve the caller's access to an App and return its identity headers.
+
+    Machine Token (JWT claims on the request): a superuser token has role `full`;
+    otherwise the token's scope decides and `none` raises 403. Browser session:
+    no session raises 401 (it vanished after the middleware gate — fail closed);
+    a superuser has role `full`; otherwise the RoleStore decides and `none`
+    raises 403. The returned dict carries the same `X-Latarnia-*` headers Caddy
+    sends to the App for its web UI.
+    """
+    claims = getattr(request.state, "jwt_claims", None)
+    if claims is not None:
+        is_super = bool(claims.get("super"))
+        user_id = claims.get("sub")
+        if is_super:
+            role = "full"
+        else:
+            role = claims.get("apps", {}).get(app_name, "none")
+            if role == "none":
+                raise HTTPException(status_code=403, detail="Token not scoped to this app")
+    else:
+        user = _session_user(request)
+        if user is None:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        is_super = bool(user["is_superuser"])
+        user_id = user["id"]
+        if is_super:
+            role = "full"
+        else:
+            role = role_store.get_role(user["id"], app_name)
+            if role == "none":
+                raise HTTPException(status_code=403, detail="No access to this app")
+    return {
+        H_USER: str(user_id),
+        H_ROLE: role,
+        H_SUPER: "true" if is_super else "false",
+    }
+
+
 @app.get("/api/apps/{app_id}")
 async def get_app(app_id: str, request: Request):
     """Get a specific application by ID (role/scope enforced).
@@ -729,20 +770,7 @@ async def get_app(app_id: str, request: Request):
         if not app:
             raise HTTPException(status_code=404, detail=f"App {app_id} not found")
 
-        claims = getattr(request.state, "jwt_claims", None)
-        if claims is not None:
-            # Machine token: super has full access; otherwise the JWT scope decides.
-            if not claims.get("super") and \
-                    claims.get("apps", {}).get(app.name, "none") == "none":
-                raise HTTPException(status_code=403, detail="Token not scoped to this app")
-        else:
-            user = _session_user(request)
-            if user is None:
-                # Session vanished after the middleware gate — fail closed.
-                raise HTTPException(status_code=401, detail="Authentication required")
-            if not user["is_superuser"] and \
-                    role_store.get_role(user["id"], app.name) == "none":
-                raise HTTPException(status_code=403, detail="No access to this app")
+        _app_access_headers(request, app.name)
 
         return app.to_dict()
     except HTTPException:
@@ -1449,7 +1477,7 @@ async def cleanup_stale_ports():
 # UI Integration Endpoints
 
 @app.get("/api/apps/{app_id}/ui/resources")
-async def get_app_ui_resources(app_id: str):
+async def get_app_ui_resources(app_id: str, request: Request):
     """Discover UI resources available from a service app"""
     try:
         from .web.ui_renderer import ui_renderer
@@ -1457,6 +1485,8 @@ async def get_app_ui_resources(app_id: str):
         app = app_manager.registry.get_app(app_id)
         if not app:
             raise HTTPException(status_code=404, detail=f"App {app_id} not found")
+
+        identity_headers = _app_access_headers(request, app.name)
         
         if app.type != "service":
             raise HTTPException(status_code=400, detail="Only service apps can have UI resources")
@@ -1466,7 +1496,7 @@ async def get_app_ui_resources(app_id: str):
             raise HTTPException(status_code=400, detail="App is not running or has no assigned port")
         
         base_url = f"http://localhost:{port}"
-        resources = await ui_renderer.discover_ui_resources(base_url)
+        resources = await ui_renderer.discover_ui_resources(base_url, headers=identity_headers)
         
         if resources is None:
             return {"has_ui": False, "resources": []}
@@ -1481,7 +1511,7 @@ async def get_app_ui_resources(app_id: str):
 
 
 @app.get("/api/apps/{app_id}/ui/{resource}")
-async def get_app_ui_resource(app_id: str, resource: str):
+async def get_app_ui_resource(app_id: str, resource: str, request: Request):
     """Fetch data for a specific UI resource"""
     try:
         from .web.ui_renderer import ui_renderer
@@ -1489,13 +1519,15 @@ async def get_app_ui_resource(app_id: str, resource: str):
         app = app_manager.registry.get_app(app_id)
         if not app:
             raise HTTPException(status_code=404, detail=f"App {app_id} not found")
+
+        identity_headers = _app_access_headers(request, app.name)
         
         port = app.runtime_info.assigned_port
         if not port:
             raise HTTPException(status_code=400, detail="App is not running")
         
         base_url = f"http://localhost:{port}"
-        data = await ui_renderer.fetch_resource_list(base_url, resource)
+        data = await ui_renderer.fetch_resource_list(base_url, resource, headers=identity_headers)
         
         if data is None:
             raise HTTPException(status_code=404, detail=f"Resource {resource} not found")
@@ -1518,7 +1550,7 @@ async def get_app_ui_resource(app_id: str, resource: str):
 
 
 @app.get("/api/apps/{app_id}/ui/{resource}/{item_id}")
-async def get_app_ui_resource_detail(app_id: str, resource: str, item_id: str):
+async def get_app_ui_resource_detail(app_id: str, resource: str, item_id: str, request: Request):
     """Fetch detail for a specific resource item"""
     try:
         from .web.ui_renderer import ui_renderer
@@ -1527,12 +1559,14 @@ async def get_app_ui_resource_detail(app_id: str, resource: str, item_id: str):
         if not app_entry:
             raise HTTPException(status_code=404, detail=f"App {app_id} not found")
 
+        identity_headers = _app_access_headers(request, app_entry.name)
+
         port = app_entry.runtime_info.assigned_port
         if not port:
             raise HTTPException(status_code=400, detail="App is not running")
 
         base_url = f"http://localhost:{port}"
-        data = await ui_renderer.fetch_resource_detail(base_url, resource, item_id)
+        data = await ui_renderer.fetch_resource_detail(base_url, resource, item_id, headers=identity_headers)
 
         if data is None:
             raise HTTPException(status_code=404, detail=f"{resource}/{item_id} not found")

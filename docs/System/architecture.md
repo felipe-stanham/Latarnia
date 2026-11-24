@@ -259,7 +259,9 @@ graph TB
   - `/apps/{name}/*` — protected via `forward_auth` to `/auth/verify`; Caddy strips the `/apps/{name}` prefix with `handle_path` before proxying to app port (Service Apps only; Streamlit Apps have no Caddy route block)
   - `/*` catch-all — protected via `forward_auth`; proxied to Latarnia `:8000` (dashboard, platform `/docs` and `/openapi.json`, API docs pages, and other browser routes). Any logged-in user can open them; the API docs router applies the per-App role check.
   - Apps' own `/docs` and `/openapi.json` are **not** published publicly (T-0020): `/apps/{name}/docs` and `/apps/{name}/openapi.json` are ordinary protected App routes, and the platform serves App API docs itself (component 14).
-- **Auth headers copied**: `X-Latarnia-User`, `X-Latarnia-App-Role`, `X-Latarnia-Is-Super`
+- **Auth headers copied**: `X-Latarnia-User`, `X-Latarnia-App-Role`, `X-Latarnia-Is-Super`. In each protected `/apps/{name}/*` block the App's `reverse_proxy` re-sets them from verify's values (so a client `Connection` header cannot strip them).
+- **App identification for verify**: each per-App `forward_auth` block sends `X-Latarnia-App: {name}` to `/auth/verify`; the catch-all deletes it. Verify does not read `X-Forwarded-Uri`. `X-Latarnia-App` is a Caddy → verify header only: protected and public-route blocks delete it before the request reaches the App. Verify returns 403 ("No access to this app") when the caller's role is `none`; Caddy passes the 403 through.
+- **UI API proxy**: `/api/apps/{app_id}/ui/*` endpoints enforce the same per-App access as `GET /api/apps/{id}` (session role via `RoleStore`, or Machine Token scope; 401/403) and forward the three `X-Latarnia-*` headers to the App.
 - **CaddyConfigManager** (`src/latarnia/caddy/manager.py`): reads the App Registry, generates the per-environment Caddyfile include at `/opt/latarnia/{env}/caddy/latarnia.caddyfile`, then reloads Caddy via `POST /load` on the Caddy admin API (`:2019`). Called on every App registration change.
 - **Firewall**: `ufw` blocks Latarnia `:8000` and app ports `:81xx` / `:90xx` from external access — all external traffic enters through Caddy only.
 
@@ -489,7 +491,7 @@ sequenceDiagram
     participant App as Service App<br/>:810x
 
     Browser->>C: GET /apps/crm/dashboard [Cookie: latarnia_session=abc]
-    C->>AV: GET /auth/verify [X-Forwarded-Uri: /apps/crm/dashboard, Cookie: ...]
+    C->>AV: GET /auth/verify [X-Latarnia-App: crm (set by Caddy), Cookie: ...]
     AV-->>C: 200 [X-Latarnia-User: uid, X-Latarnia-App-Role: webUI-med, X-Latarnia-Is-Super: false]
     C->>App: GET /dashboard [X-Latarnia-User: uid, X-Latarnia-App-Role: webUI-med]
     App-->>Browser: 200 OK HTML
@@ -497,7 +499,7 @@ sequenceDiagram
     Note over Browser,App: App's own /docs is an ordinary protected route (no public bypass)
 
     Browser->>C: GET /apps/crm/docs [Cookie: latarnia_session=abc]
-    C->>AV: GET /auth/verify [X-Forwarded-Uri: /apps/crm/docs]
+    C->>AV: GET /auth/verify [X-Latarnia-App: crm]
     AV-->>C: 200 [role headers]
     C->>App: GET /docs
     App-->>Browser: 200 OK
@@ -505,9 +507,16 @@ sequenceDiagram
     Note over Browser,App: Auth failure
 
     Browser->>C: GET /apps/crm/dashboard [no valid session]
-    C->>AV: GET /auth/verify [X-Forwarded-Uri: /apps/crm/dashboard]
+    C->>AV: GET /auth/verify [X-Latarnia-App: crm]
     AV-->>C: 401 Unauthorized
     C-->>Browser: 401 (redirects to /auth/login)
+
+    Note over Browser,App: Authenticated, role none on the App
+
+    Browser->>C: GET /apps/crm/dashboard [valid session, no role on crm]
+    C->>AV: GET /auth/verify [X-Latarnia-App: crm]
+    AV-->>C: 403 No access to this app
+    C-->>Browser: 403 (passed through; only 401 redirects to login)
 ```
 
 ## Security Model

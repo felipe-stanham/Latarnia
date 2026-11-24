@@ -1,5 +1,7 @@
 """Unit tests for CaddyConfigManager (P-0008 Scope 1)."""
 import os
+import shutil
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -285,3 +287,122 @@ def test_hooks_are_exception_safe(tmp_path, monkeypatch):
         # Must not raise — request handlers depend on this.
         assert mgr.on_app_registered("x") is False
         assert mgr.on_app_deregistered("x") is False
+
+
+# T-0023: Caddy names the App for /auth/verify. The forward_auth block of each
+# `/apps/{name}/*` block sends `X-Latarnia-App: {name}`; the catch-all deletes any
+# client-sent `X-Latarnia-App`. verify no longer reads the URI, so no
+# X-Forwarded-Uri override is generated.
+
+def _forward_auth_body(block: str) -> str:
+    """The body of the single `forward_auth ... {` block inside `block`."""
+    assert block.count("forward_auth ") == 1
+    start = block.index("forward_auth ")
+    header = block[start:block.index("{", start) + 1]
+    return _block_body(block[start:], header)
+
+
+def _lines(body: str) -> list:
+    return [line.strip() for line in body.splitlines() if line.strip()]
+
+
+def _app_header_lines(body: str) -> list:
+    """Lines that set or delete `X-Latarnia-App` (not `X-Latarnia-App-Role`)."""
+    return [line for line in _lines(body)
+            if {"X-Latarnia-App", "-X-Latarnia-App"} & set(line.split())]
+
+
+def test_forward_auth_blocks_name_the_app(tmp_path, monkeypatch):
+    # t23-016
+    apps = [_make_app("a", port=8151, public_routes=["/b/"]), _make_app("b", port=8152)]
+    mgr = _manager(tmp_path, apps, monkeypatch, env="dev")
+    config = mgr.generate_config()
+
+    fa_a = _lines(_forward_auth_body(_block_body(config, "handle_path /apps/a/* {")))
+    fa_b = _lines(_forward_auth_body(_block_body(config, "handle_path /apps/b/* {")))
+    fa_all = _lines(_forward_auth_body(_block_body(config, "handle /* {")))
+
+    assert "header_up X-Latarnia-App a" in fa_a
+    assert "header_up X-Latarnia-App b" not in fa_a
+    assert "header_up X-Latarnia-App b" in fa_b
+    assert "header_up X-Latarnia-App a" not in fa_b
+    assert "header_up -X-Latarnia-App" in fa_all
+    # Exactly one X-Latarnia-App line per forward_auth block.
+    for body in (fa_a, fa_b, fa_all):
+        assert len(_app_header_lines("\n".join(body))) == 1
+    assert config.count("forward_auth ") == 3
+    # verify does not read the URI: no X-Forwarded-Uri override anywhere.
+    assert "X-Forwarded-Uri" not in config
+    # The 401-only login redirect is unchanged.
+    for body in (fa_a, fa_b, fa_all):
+        assert "redir * /auth/login?next={http.request.orig_uri} 302" in body
+    # Only the per-App forward_auth blocks *set* X-Latarnia-App; every other
+    # X-Latarnia-App line deletes it (App proxies: t23-016b).
+    set_lines = [line for line in _app_header_lines(config)
+                 if not line.startswith("header_up -")]
+    assert set_lines == ["header_up X-Latarnia-App a", "header_up X-Latarnia-App b"]
+    for header in ("handle /api/* {", "handle /auth/* {"):
+        assert _app_header_lines(_block_body(config, header)) == []
+
+
+IDENTITY_HEADERS = ("X-Latarnia-User", "X-Latarnia-App-Role", "X-Latarnia-Is-Super")
+
+
+def test_protected_app_proxy_resets_identity_headers(tmp_path, monkeypatch):
+    # t23-016b: the App's reverse_proxy in each protected /apps/{name}/* block
+    # re-sets the identity headers from the request (where copy_headers put
+    # verify's values), so a client `Connection` header cannot strip them, and
+    # deletes `X-Latarnia-App` (a Caddy → verify header; forward_auth's
+    # `header_up` only affects the request to /auth/verify). Each public-route
+    # App proxy deletes it too.
+    apps = [_make_app("a", port=8151, public_routes=["/b/", "/c/"]),
+            _make_app("b", port=8152, public_routes=["/pub/"])]
+    mgr = _manager(tmp_path, apps, monkeypatch, env="dev")
+    config = mgr.generate_config()
+
+    expected = [f"header_up {h} {{http.request.header.{h}}}" for h in IDENTITY_HEADERS]
+    for name, port in (("a", 8151), ("b", 8152)):
+        block = _block_body(config, f"handle_path /apps/{name}/* {{")
+        proxy_header = f"reverse_proxy localhost:{port} {{"
+        assert block.count("reverse_proxy ") == 1
+        proxy = _lines(_block_body(block, proxy_header))
+        # _block_body keeps the closing brace
+        assert proxy == expected + ["header_up -X-Latarnia-App", "}"]
+        # The re-set lines belong to the App's proxy, not to forward_auth
+        # (whose only X-Latarnia-App line names the App).
+        fa = _lines(_forward_auth_body(block))
+        assert not set(expected) & set(fa)
+        assert _app_header_lines("\n".join(fa)) == [f"header_up X-Latarnia-App {name}"]
+
+    # Only the two protected App proxies carry them.
+    for line in expected:
+        assert _lines(config).count(line) == 2
+    # Each public-route block: identity headers and X-Latarnia-App deleted,
+    # never re-set.
+    for header in ("handle /apps/a/b/* {", "handle /apps/a/c/* {", "handle /apps/b/pub/* {"):
+        pub = _lines(_block_body(config, header))
+        assert [line for line in pub if line.startswith("header_up")] == [
+            f"header_up -{h}" for h in IDENTITY_HEADERS] + ["header_up -X-Latarnia-App"]
+    # Catch-all proxy to the platform unchanged (no block).
+    assert "reverse_proxy localhost:8000" in _lines(_block_body(config, "handle /* {"))
+
+
+@pytest.mark.skipif(shutil.which("caddy") is None,
+                    reason="caddy binary not installed — `caddy adapt` check NOT run")
+def test_generated_caddyfile_is_accepted_by_caddy_adapt(tmp_path, monkeypatch):
+    # t23-016 / t23-016b: the real Caddyfile adapter accepts the generated text
+    # (`header_up` inside `forward_auth` is a reverse_proxy subdirective; the
+    # App's reverse_proxy block re-sets the identity headers).
+    apps = [_make_app("a", port=8151, public_routes=["/b/"]), _make_app("b", port=8152)]
+    mgr = _manager(tmp_path, apps, monkeypatch, env="dev")
+    mgr.config_manager.config.mcp.enabled = True
+    mgr.config_manager.config.mcp.gateway_path = "/mcp"
+    mgr.generate_config()
+    proc = subprocess.run(
+        [shutil.which("caddy"), "adapt", "--adapter", "caddyfile",
+         "--config", str(mgr._caddyfile_path())],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "X-Latarnia-App" in proc.stdout
+    assert "{http.request.header.X-Latarnia-App-Role}" in proc.stdout

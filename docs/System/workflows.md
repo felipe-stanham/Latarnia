@@ -399,10 +399,9 @@ sequenceDiagram
     Note over Browser,Dash: Dashboard load — server-side tile filtering
 
     Browser->>Caddy: GET / [Cookie: latarnia_session=abc]
-    Caddy->>AV: GET /auth/verify [X-Forwarded-Uri: /]
+    Caddy->>AV: GET /auth/verify [catch-all: no X-Latarnia-App]
     AV->>DB: Validate session hash
-    AV->>RS: get_role(user_id, app_name) for X-Forwarded-Uri app
-    AV-->>Caddy: 200 [X-Latarnia-User: uid, X-Latarnia-App-Role: webUI-med, X-Latarnia-Is-Super: false]
+    AV-->>Caddy: 200 [X-Latarnia-User: uid, X-Latarnia-Is-Super: false] (no App named, any logged-in user)
     Caddy->>Dash: GET /api/apps [X-Latarnia-User: uid, X-Latarnia-Is-Super: false]
     Dash->>RS: get_role(uid, app) for each app in registry
     Note over Dash: Filter: hide tiles where role = none<br/>Superuser bypasses filter (all apps visible, role = full)
@@ -411,11 +410,16 @@ sequenceDiagram
     Note over Browser,DB: Protected app request — role injected into proxy headers
 
     Browser->>Caddy: GET /apps/crm/dashboard [Cookie: ...]
-    Caddy->>AV: GET /auth/verify [X-Forwarded-Uri: /apps/crm/dashboard, Cookie: ...]
+    Caddy->>AV: GET /auth/verify [X-Latarnia-App: crm (set by Caddy), Cookie: ...]
     AV->>DB: Validate session
     AV->>RS: get_role(uid, "crm")
-    AV-->>Caddy: 200 [X-Latarnia-User: uid, X-Latarnia-App-Role: webUI-med, X-Latarnia-Is-Super: false]
-    Caddy->>Caddy: Copy X-Latarnia-* headers to upstream
+    alt role = none
+        AV-->>Caddy: 403 "No access to this app" (no X-Latarnia-* headers)
+        Caddy-->>Browser: 403 (passed through, no login redirect)
+    else role != none
+        AV-->>Caddy: 200 [X-Latarnia-User: uid, X-Latarnia-App-Role: webUI-med, X-Latarnia-Is-Super: false]
+        Caddy->>Caddy: reverse_proxy re-sets the three X-Latarnia-* headers from verify's values and deletes X-Latarnia-App
+    end
     Note right of Caddy: App receives role header;<br/>may adjust content accordingly
 ```
 
@@ -516,7 +520,7 @@ sequenceDiagram
     Note over Browser,App: Protected app page
 
     Browser->>C: GET /apps/crm/dashboard [Cookie: latarnia_session=abc]
-    C->>AV: GET /auth/verify [X-Forwarded-Uri: /apps/crm/dashboard, Cookie: ...]
+    C->>AV: GET /auth/verify [X-Latarnia-App: crm (set by Caddy), Cookie: ...]
     AV-->>C: 200 [X-Latarnia-User: uid, X-Latarnia-App-Role: webUI-med, X-Latarnia-Is-Super: false]
     C->>App: GET /dashboard [X-Latarnia-User, X-Latarnia-App-Role headers]
     App-->>Browser: 200 OK HTML
@@ -524,7 +528,7 @@ sequenceDiagram
     Note over Browser,App: App's own /docs is an ordinary protected route (no public bypass)
 
     Browser->>C: GET /apps/crm/docs [Cookie: latarnia_session=abc]
-    C->>AV: GET /auth/verify [X-Forwarded-Uri: /apps/crm/docs]
+    C->>AV: GET /auth/verify [X-Latarnia-App: crm]
     AV-->>C: 200 [role headers]
     C->>App: GET /docs
     App-->>Browser: 200 OK

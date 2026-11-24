@@ -4,10 +4,11 @@
 cd "$(dirname "$0")/../.." || exit 2; . tests/cache/t20_lib.sh
 load_principals
 PYTHONPATH=src $PY $CACHE/t20_caddy_check.py 011 || FAILS=1
-URI='X-Forwarded-Uri: /apps/example_full_app/docs/x'
-check "verify anonymous" 401 "$(code $BASE/auth/verify -H "$URI")"
-check "verify with session" 200 "$(code -b latarnia_session=$S_LOW $BASE/auth/verify -H "$URI")"
-HDRS=$(curl -s -D - -o /dev/null -b latarnia_session=$S_LOW $BASE/auth/verify -H "$URI" | tr -d '\r')
+# T-0023: Caddy's /apps/example_full_app/* forward_auth block names the App for verify.
+APP_HDR='X-Latarnia-App: example_full_app'
+check "verify anonymous" 401 "$(code $BASE/auth/verify -H "$APP_HDR")"
+check "verify with session" 200 "$(code -b latarnia_session=$S_LOW $BASE/auth/verify -H "$APP_HDR")"
+HDRS=$(curl -s -D - -o /dev/null -b latarnia_session=$S_LOW $BASE/auth/verify -H "$APP_HDR" | tr -d '\r')
 for h in x-latarnia-user x-latarnia-app-role x-latarnia-is-super; do
   if echo "$HDRS" | grep -qi "^$h:"; then echo "  ok   verify returns $h"; else echo "  FAIL verify missing $h"; FAILS=$((FAILS+1)); fi
 done

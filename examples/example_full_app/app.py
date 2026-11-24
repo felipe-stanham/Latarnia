@@ -311,7 +311,7 @@ async def health():
 @rest_app.get("/ui")
 async def ui_resources():
     """Return list of browsable resources for the legacy UI modal."""
-    return ["items", "events"]
+    return ["items", "events", "caller"]
 
 
 # T-0004: public bundle route — no auth required.
@@ -324,6 +324,30 @@ async def public_bundle_test(request: Request):
         if k.lower().startswith("x-latarnia-")
     }
     return {"ok": True, "latarnia_headers_received": latarnia_headers}
+
+
+# T-0023: the platform's UI API proxy forwards the caller's identity. Echo the
+# received X-Latarnia-* headers as a one-row resource so the dashboard (and
+# acceptance tests) can verify the forwarding end to end.
+def _caller_row(request: Request) -> dict:
+    return {
+        "id": 1,
+        "user": request.headers.get("X-Latarnia-User"),
+        "role": request.headers.get("X-Latarnia-App-Role"),
+        "is_super": request.headers.get("X-Latarnia-Is-Super"),
+    }
+
+
+@rest_app.get("/api/caller")
+async def caller(request: Request):
+    return [_caller_row(request)]
+
+
+# The dashboard detail modal calls /api/{resource}/{id}; the single row is the
+# same caller identity.
+@rest_app.get("/api/caller/{item_id}")
+async def caller_detail(item_id: int, request: Request):
+    return _caller_row(request)
 
 
 @rest_app.get("/api/items/{item_id}")

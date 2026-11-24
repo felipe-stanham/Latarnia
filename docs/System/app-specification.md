@@ -282,8 +282,11 @@ before proxying it to your app. On authenticated requests the platform injects
 the following headers so your app knows *who* is calling and at *what access
 level* — your app never implements authentication itself.
 
-All three are set together by `/auth/verify` on an authenticated request; an
-unauthenticated request is intercepted by Caddy and never reaches your app.
+All three are set together by the platform on every authenticated request that
+reaches your app: through Caddy (web UI) and on UI API calls the dashboard
+proxies to your app. An unauthenticated request is intercepted by Caddy and
+never reaches your app; a caller whose role is `none` is rejected by the
+platform (403) before your app sees the request.
 
 | Header | Always present? | Values | Meaning |
 |--------|-----------------|--------|---------|
@@ -293,7 +296,7 @@ unauthenticated request is intercepted by Caddy and never reaches your app.
 
 **Role semantics** (your app decides what each level means):
 
-- `none` — no access; the platform won't normally route the user here (the dashboard tile is hidden). Treat as deny.
+- `none` — no access; the platform rejects the request (403) before it reaches your app, so you should not normally see this value. Treat as deny if you do.
 - `webUI-low` / `webUI-med` / `webUI-full` — increasing webUI capability. A common pattern: `low` = read-only, `med`+ = create/update, `full` = administrative actions.
 - `full` — full webUI access **plus** REST API access. Superusers always receive `full`.
 
@@ -303,6 +306,10 @@ unauthenticated request is intercepted by Caddy and never reaches your app.
   ports are not externally reachable (the firewall blocks them — see the ufw
   rules). Trust `X-Latarnia-*` **only** when your app is reached through the
   platform, never when its port is directly exposed.
+- The platform re-sets all three headers on each request, so a client cannot
+  forge or strip them. `X-Latarnia-App` is an internal Caddy → verify header
+  and is removed before your app; an app should never see it, and anything
+  claiming to be it did not come from the platform.
 - Apps must not implement their own login. They receive the user's role and may
   use it to adjust responses (hide actions, gate writes, etc.).
 

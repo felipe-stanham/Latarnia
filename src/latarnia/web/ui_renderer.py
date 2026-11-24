@@ -16,19 +16,21 @@ class UIRenderer:
     def __init__(self):
         self.logger = logging.getLogger("latarnia.ui_renderer")
     
-    async def discover_ui_resources(self, base_url: str) -> Optional[List[str]]:
+    async def discover_ui_resources(self, base_url: str,
+                                    headers: Optional[Dict[str, str]] = None) -> Optional[List[str]]:
         """
         Discover available UI resources from a service app's /ui endpoint
         
         Args:
             base_url: Base URL of the service app (e.g., http://localhost:8100)
+            headers: Optional request headers (the caller's X-Latarnia-* identity)
             
         Returns:
             List of resource names or None if /ui endpoint doesn't exist
         """
         try:
             async with httpx.AsyncClient() as client:
-                response = await client.get(f"{base_url}/ui", timeout=5.0)
+                response = await client.get(f"{base_url}/ui", headers=headers, timeout=5.0)
                 if response.status_code == 200:
                     resources = response.json()
                     if isinstance(resources, list):
@@ -39,20 +41,22 @@ class UIRenderer:
             self.logger.debug(f"No /ui endpoint found at {base_url}: {e}")
             return None
     
-    async def fetch_resource_list(self, base_url: str, resource: str) -> Optional[List[Dict[str, Any]]]:
+    async def fetch_resource_list(self, base_url: str, resource: str,
+                                  headers: Optional[Dict[str, str]] = None) -> Optional[List[Dict[str, Any]]]:
         """
         Fetch a list of items from a resource endpoint
         
         Args:
             base_url: Base URL of the service app
             resource: Resource name (e.g., "messages", "files")
+            headers: Optional request headers (the caller's X-Latarnia-* identity)
             
         Returns:
             List of resource items or None on error
         """
         try:
             async with httpx.AsyncClient() as client:
-                response = await client.get(f"{base_url}/api/{resource}", timeout=10.0)
+                response = await client.get(f"{base_url}/api/{resource}", headers=headers, timeout=10.0)
                 if response.status_code == 200:
                     data = response.json()
                     if isinstance(data, list):
@@ -62,7 +66,8 @@ class UIRenderer:
             self.logger.error(f"Failed to fetch {resource} from {base_url}: {e}")
             return None
     
-    async def fetch_resource_detail(self, base_url: str, resource: str, item_id: Any) -> Optional[Dict[str, Any]]:
+    async def fetch_resource_detail(self, base_url: str, resource: str, item_id: Any,
+                                    headers: Optional[Dict[str, str]] = None) -> Optional[Dict[str, Any]]:
         """
         Fetch details for a specific resource item
         
@@ -70,13 +75,14 @@ class UIRenderer:
             base_url: Base URL of the service app
             resource: Resource name
             item_id: ID of the specific item
+            headers: Optional request headers (the caller's X-Latarnia-* identity)
             
         Returns:
             Resource item details or None on error
         """
         try:
             async with httpx.AsyncClient() as client:
-                response = await client.get(f"{base_url}/api/{resource}/{item_id}", timeout=10.0)
+                response = await client.get(f"{base_url}/api/{resource}/{item_id}", headers=headers, timeout=10.0)
                 if response.status_code == 200:
                     return response.json()
                 return None
