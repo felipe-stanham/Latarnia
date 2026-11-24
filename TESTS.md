@@ -46,6 +46,8 @@ Critical-path tests for Latarnia. Each test is declarative — Claude Code gener
 
 - **test_manifest_version_validation:** Attempt to create `AppManifest` with `version="1.0"` (invalid semver). -> Raises validation error (pydantic `ValidationError`).
 
+- **test_app_name_pattern:** (T-0024) Manifest `name` `a{http.request.uri}`, `Camera Detection`, `App_A`, `a/b` or `app\n` -> `AppManifest` raises `ValidationError` on `name` and `discover_apps()` does not register the App (ERROR `Invalid manifest in <path>`); `latarnik`, `example_full_app`, `crm-app` -> valid.
+
 ## Service Management
 
 - **test_service_template_generation:** Create `ServiceManager` with mocked dependencies. Mock `registry.get_app` to return a service app entry at path `/tmp/test-service` with `assigned_port=8100`, `main_file="app.py"`, `restart_policy="always"`, `redis_required=True`, `data_dir=True`. Call `generate_service_template("test-service")`. -> Returns a string containing `"Description=Latarnia Service - test-service"`, `"ExecStart={sys.executable} app.py --port 8100"` (absolute venv Python — no bare `python`), `"Restart=always"`, `"Environment=ENV={env}"`, `"Environment=REDIS_HOST=localhost"`. Must NOT contain `"PartOf="` (P-0005 Scope 4: lifecycle decoupling) and must NOT contain `"--logs-dir"` (P-0005 Scope 4: journald is the canonical sink).

@@ -25,4 +25,4 @@
 | [T-0021](T-0021.md) | App API responses leak the App's Postgres password | [DONE] |
 | [T-0022](T-0022.md) | Machine Token fixes — superuser 401 on `/api/apps/{id}`, same-second JWT collision | [DONE] |
 | [T-0023](T-0023.md) | Per-App authorization — `/auth/verify` rejects role `none`; UI API proxy checks access and forwards identity | [DONE] |
-| [T-0024](T-0024.md) | App names follow a safe pattern | [IN PROGRESS] |
+| [T-0024](T-0024.md) | App names follow a safe pattern | [DONE] |
