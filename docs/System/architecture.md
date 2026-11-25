@@ -537,7 +537,7 @@ sequenceDiagram
 - Caddy is the sole external ingress; app ports and Latarnia :8000 are blocked from external access by ufw
 - All external traffic to app web UIs passes through Caddy's `forward_auth` gate
 - All `/api/*` requests are gated by `JWTAuthMiddleware`: accepts Bearer JWT (validated + revocation-checked) or a valid session cookie; 401 otherwise
-- Machine clients (scripts, AI agents) authenticate with long-lived HS256 JWTs issued via `POST /api/auth/tokens` (superuser session required). JWT revocation is a DB lookup on every request
+- Machine clients (scripts, AI agents) authenticate with long-lived HS256 JWTs issued via `POST /api/auth/tokens` (any logged-in user; a non-superuser's per-App roles are capped at their own role on that App, and only a superuser may grant `full`, else 403). JWT revocation is a DB lookup on every request
 - MCP Gateway requires a Bearer JWT to open the SSE session; per-connection `ContextVar` carries the token's app scope to isolate concurrent agent connections
 
 ### Resource Management

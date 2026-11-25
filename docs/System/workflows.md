@@ -455,10 +455,10 @@ sequenceDiagram
     participant DB as latarnia_platform_{env}
     actor Client as Machine Client
 
-    Note over Operator,DB: Token creation (one-time, requires superuser session)
+    Note over Operator,DB: Token creation (one-time, any logged-in user; scope capped by the caller's own roles)
 
     Operator->>Dashboard: POST /api/auth/tokens {label, app_scope, expires_at}
-    Dashboard->>Auth: (superuser session cookie required)
+    Dashboard->>Auth: (session cookie required; non-superuser scope checked against own roles)
     Auth->>MTS: create(label, app_scope, expires_at, granted_by)
     MTS->>MTS: Sign HS256 JWT {sub, iat, jti, exp, apps, super}
     MTS->>DB: INSERT machine_tokens (token_hash=SHA256(jwt), app_scope, ...)
@@ -485,7 +485,7 @@ sequenceDiagram
     Operator->>Auth: DELETE /api/auth/tokens/{id}  →  set revoked_at = now()
 ```
 
-`LATARNIA_JWT_SECRET` (from `secrets.env`) is the HS256 signing key. Token creation requires a superuser session if any app in `app_scope` carries the `full` role.
+`LATARNIA_JWT_SECRET` (from `secrets.env`) is the HS256 signing key. Any logged-in user may create a token. A superuser may grant any role. A non-superuser may grant on each App only a role no higher than their own role on that App (order: `ROLE_VALUES` in `src/latarnia/auth/roles.py`), and only a superuser may grant `full`; otherwise the request returns 403 and no token is created.
 
 ## 12. MCP Gateway Bearer Auth Flow
 

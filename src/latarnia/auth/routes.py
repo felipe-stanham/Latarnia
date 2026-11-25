@@ -496,6 +496,17 @@ def build_auth_router(auth_db, user_store, session_store, totp_provider,
                     status_code=403,
                     detail="Only a superuser can issue a token with the 'full' role",
                 )
+            # A token never carries more than its owner holds: on each App the
+            # role must rank at or below the caller's own role there (T-0025).
+            # Every entry is validated before any token is issued.
+            if not actor["is_superuser"]:
+                own_role = _role_for(actor, app_name)
+                if ROLE_VALUES.index(role) > ROLE_VALUES.index(own_role):
+                    raise HTTPException(
+                        status_code=403,
+                        detail=(f"Cannot grant '{role}' on '{app_name}': "
+                                f"your role there is '{own_role}'"),
+                    )
         expires_at = None
         raw_exp = body.get("expires_at")
         if raw_exp:
