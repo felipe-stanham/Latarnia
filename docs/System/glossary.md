@@ -22,7 +22,7 @@ This file is the single source of truth for domain vocabulary across this projec
 
 ### App User
 
-**Definition:** A platform user that the platform creates and owns on behalf of an App that consumes other Apps' App REST APIs. It identifies that App as the caller, cannot log in, and is removed together with the App.
+**Definition:** *(Planned with the App REST API — not built yet.)* A platform user that the platform creates and owns on behalf of an App that consumes other Apps' App REST APIs. It identifies that App as the caller, cannot log in, and is removed together with the App.
 **Not to be confused with:** A person's platform user, which logs in with TOTP and is managed by the superuser.
 
 ---
@@ -48,7 +48,6 @@ This file is the single source of truth for domain vocabulary across this projec
 ### Redis Stream
 
 **Definition:** A guaranteed-delivery, ordered message channel between Apps, backed by Redis Streams (`XADD` / `XREADGROUP`). Each stream has exactly one publisher App; multiple Apps may subscribe via their own consumer groups, provisioned by the Stream Manager.
-**Not to be confused with:** Message Bus, which uses Redis pub/sub and provides no delivery guarantee or persistence.
 
 ---
 
@@ -67,7 +66,7 @@ This file is the single source of truth for domain vocabulary across this projec
 
 ### Streamlit App
 
-**Definition:** An App of type `"streamlit"` in its manifest. Started on-demand when a user opens its UI; automatically terminated after a configurable TTL. Always has a UI. Does not support systemd lifecycle or crash recovery.
+**Definition:** An App of type `"streamlit"` in its manifest. Started on-demand when a user opens its UI; automatically terminated after an idle TTL. Always has a UI. Does not support systemd lifecycle or crash recovery.
 **Not to be confused with:** Service App.
 
 ---
@@ -82,7 +81,7 @@ This file is the single source of truth for domain vocabulary across this projec
 
 ### App REST API
 
-**Definition:** The machine-facing API of an App, published by the platform under `/rest/{app}/` for other Apps and external consumers. Accepts only a Machine Token; the platform authenticates the caller and forwards its identity and per-App role, so the App never authenticates.
+**Definition:** *(Planned, I-0002 — not served yet.)* The machine-facing API of an App, to be published by the platform under `/rest/{app}/` for other Apps and external consumers. Accepts only a Machine Token; the platform authenticates the caller and forwards its identity and per-App role, so the App never authenticates.
 **Not to be confused with:** UI API.
 
 ---
@@ -102,7 +101,7 @@ This file is the single source of truth for domain vocabulary across this projec
 
 ### Machine Token
 
-**Definition:** A revocable credential issued to a platform user, scoped to a set of Apps with a role per App. Authenticates non-browser clients to the MCP Gateway, the platform API and App REST APIs.
+**Definition:** A revocable credential issued to a platform user, scoped to a set of Apps with a role per App. Authenticates non-browser clients to the MCP Gateway and the platform API (and to App REST APIs once they exist).
 
 ---
 
@@ -110,13 +109,6 @@ This file is the single source of truth for domain vocabulary across this projec
 
 **Definition:** The platform's single SSE endpoint at `/mcp` that aggregates MCP tools from all running MCP-enabled Apps into a unified, namespaced Tool Index. External AI clients (e.g., Claude Desktop) connect here — not to individual App MCP servers. Maps to `mcp_gateway.py`.
 **Not to be confused with:** An App's own per-app MCP server, which runs on a separately allocated port and is consumed by the Gateway.
-
----
-
-### Message Bus
-
-**Definition:** The Redis pub/sub channel set (`latarnia:events:*`) used for platform-level status events (app_started, app_stopped, health_check, etc.). Provides no delivery guarantee or message persistence.
-**Not to be confused with:** Redis Stream, which is used for durable, guaranteed-delivery App-to-App messaging.
 
 ---
 
@@ -168,10 +160,11 @@ This file is the single source of truth for domain vocabulary across this projec
 
 ### UI Manager
 
-**Definition:** The platform component that manages Streamlit App lifecycle: spawning processes on demand, enforcing TTL-based cleanup (default 300 s), and tracking active instances. Maps to `streamlit_manager.py` (or equivalent).
+**Definition:** The platform component that manages Streamlit App lifecycle: spawning processes on demand, enforcing idle-TTL cleanup, and tracking active instances. Maps to `streamlit_manager.py` (or equivalent).
 
 ---
 
 ## Deprecated
 
 ~~MacOSProcessManager~~ — replaced by [Subprocess Launcher](#subprocess-launcher) in P-0005 Scope 2.
+~~Message Bus~~ — retired on 2026-11-25: the platform no longer uses Redis pub/sub (`latarnia:events:*`); App-to-App messaging and the platform activity feed use [Redis Stream](#redis-stream).
