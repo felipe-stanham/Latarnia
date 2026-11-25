@@ -26,6 +26,6 @@
 | [T-0022](T-0022.md) | Machine Token fixes — superuser 401 on `/api/apps/{id}`, same-second JWT collision | [DONE] |
 | [T-0023](T-0023.md) | Per-App authorization — `/auth/verify` rejects role `none`; UI API proxy checks access and forwards identity | [DONE] |
 | [T-0024](T-0024.md) | App names follow a safe pattern | [DONE] |
-| [T-0025](T-0025.md) | A Machine Token cannot carry more than its owner's role | [IN PROGRESS] |
+| [T-0025](T-0025.md) | A Machine Token cannot carry more than its owner's role | [DONE] |
 | [T-0026](T-0026.md) | Streamlit config keys — remove `streamlit_port`, wire `streamlit_ttl_seconds` | [ ] |
 | [T-0027](T-0027.md) | Health monitor probes every running Service App | [ ] |

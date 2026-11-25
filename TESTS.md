@@ -254,6 +254,7 @@ These tests require the Playwright MCP server and a running local dev instance o
 
 - **test_token_issue_and_use:** `POST /api/auth/tokens` `{"label":"agent","app_scope":{"example_full_app":"webUI-med"}}` (session-authed) -> returns a raw JWT once. `GET /api/apps` with `Authorization: Bearer <jwt>` -> 200. No token -> 401.
 - **test_token_revocation:** `DELETE /api/auth/tokens/{id}` -> token marked revoked; a subsequent `GET /api/apps` with that token -> 401.
+- **test_token_scope_capped_by_owner_role:** (T-0025) Non-superuser with role `none` on an App -> `POST /api/auth/tokens` with `app_scope` `{<app>: webUI-full}` -> 403 naming the App and the caller's role, no token created; with role `webUI-med` -> `webUI-med`/`webUI-low` 200, `webUI-full` 403; mixed scope with one entry above the caller's role -> 403 and no token; superuser -> any scope 200.
 - **test_token_scope_enforced:** A non-superuser token scoped to app A -> `GET /api/apps/{B}` returns 403.
 - **test_superuser_token_gets_single_app:** (T-0022) `main.get_app` with claims `{"super": true, "apps": {}}` and no session -> returns the App (200), not 401. Covered by `tests/unit/test_machine_token_access.py`.
 - **test_identical_same_second_mints_unique:** (T-0022) Two `POST /api/auth/tokens` with identical body in the same second (`time.time` frozen) -> both 200, distinct tokens and `token_hash` values. Covered by `tests/integration/test_token_flow.py::test_identical_same_second_mints_both_succeed`.
