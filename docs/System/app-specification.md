@@ -12,13 +12,13 @@ This specification defines the requirements for apps that integrate with the Lat
 - **Requirements**: Must implement required API endpoints, handle SIGTERM cleanly, and write logs to stdout/stderr (Latarnia routes them to journald on Linux).
 - **Startup Command**: `python app.py --port {assigned_port} [--mcp-port {mcp_port}]`
 - **Crash recovery**: systemd respawns failed processes per the unit's `Restart=` policy (default `on-failure`, configurable via `config.restart_policy`).
-- **Log location**: `journalctl --user -u latarnia-{env}-{app}.service` on Linux. The dashboard's logs panel queries this automatically.
+- **Log location**: `journalctl _SYSTEMD_USER_UNIT=latarnia-{env}-{app}.service` on Linux (system journal, no `--user`). The dashboard's logs panel queries this automatically.
 
 ### Streamlit Apps
 - **Lifecycle**: Started on-demand when user opens UI, single instance only
-- **Port Assignment**: Fixed port assigned by the main app
-- **TTL**: Automatically killed after configured timeout
-- **Startup Command**: `streamlit run app.py --server.port {configured_port}`
+- **Port Assignment**: Allocated by the main app through `port_manager.allocate_port` from the Service App range (`process_manager.port_range`); released when the app stops
+- **TTL**: Automatically killed after an idle timeout, the hard-coded `default_ttl` in `src/latarnia/managers/streamlit_manager.py`. The config keys `process_manager.streamlit_port` and `process_manager.streamlit_ttl_seconds` currently have no effect
+- **Startup Command**: `python3 -m streamlit run {main_file} --server.port {configured_port} --server.headless true --browser.gatherUsageStats false --server.fileWatcherType none` (see `src/latarnia/managers/streamlit_manager.py`)
 
 ## Common Requirements
 
@@ -66,7 +66,7 @@ Each app must include a `latarnia.json` file in its root directory:
 #### Manifest Field Definitions
 
 ##### Required Fields
-- **name**: App identifier (also its registry key). Lowercase letters, digits, `_`, `-`; starts with a letter; max 50 characters. Source of truth: `APP_NAME_PATTERN` in `src/latarnia/managers/app_manager.py`. An App whose name does not match is not registered and an ERROR `Invalid manifest in <path>` is logged. Use `description` for human-readable text.
+- **name**: App identifier, used for the `/apps/{name}/` route, MCP tool namespace and `requires` matching. It is **not** the registry key: the App Registry key is the `app_id`, derived from the App's folder name (lowercased, `_` and spaces mapped to `-`; see `AppManager._generate_app_id`). Lowercase letters, digits, `_`, `-`; starts with a letter; max 50 characters. Source of truth: `APP_NAME_PATTERN` in `src/latarnia/managers/app_manager.py`. An App whose name does not match is not registered and an ERROR `Invalid manifest in <path>` is logged. Use `description` for human-readable text.
 - **version**: Semantic version (x.y.z)
 - **description**: Brief description of app functionality
 - **type**: `"service"` or `"streamlit"`
@@ -88,8 +88,7 @@ Each app must include a `latarnia.json` file in its root directory:
 - **config.requires_secrets**: Array of environment-variable names the app needs at runtime (default: []). The platform injects matching values from `/opt/latarnia/{env}/secrets.env` into the app's process environment at launch (P-0006). The platform refuses to start the app if any declared name is missing from the master file. See the "Secrets" section below for the operator-side contract.
 - **config.public_routes**: Array of path-prefix strings (default: []). Each prefix is served by Caddy without `forward_auth` — fully anonymous, identity headers stripped. The app receives the path with `/apps/{name}` removed (e.g. `/apps/x/b/foo` → `/b/foo`). Validation rules: each entry must start with `/`; entries that are exactly `/`, are empty, or overlap reserved paths (`/health`, `/openapi.json`) are silently dropped with a WARNING log — the app still starts and the Caddyfile is unaffected for those entries. Changes take effect on the next app discovery or platform restart. `/b/` is the platform convention for public bundles (see Path Conventions above).
 - **install.setup_commands**: Shell commands to run during installation
-- **events.publishes**: Array of event types this app publishes (see Redis Events section)
-- **events.subscribes**: Array of event types this app subscribes to (see Redis Events section)
+- **events.publishes** / **events.subscribes**: documentation-only; the platform does not read them (see the Redis Integration section). Use `config.redis_streams_publish` / `config.redis_streams_subscribe` for platform-managed messaging.
 - **requires**: Array of dependency objects. Each declares a required app and minimum version. If any dependency is unmet at discovery time, the app will not be registered.
 
 ##### Dependency Declaration (requires)
@@ -111,7 +110,7 @@ The platform and Caddy unconditionally own certain path prefixes on every app. A
 
 | Path prefix | Owner | Behavior |
 |---|---|---|
-| `/health` | Platform | Required health probe. Apps must implement this endpoint exactly as specified below. |
+| `/health` | Platform | Required health probe. Apps must implement this endpoint exactly as specified below. **Known limitation:** the health monitor currently probes only Service Apps whose manifest sets `config.has_UI: true`. |
 | `/openapi.json` | Platform (T-0020) | The App's OpenAPI schema. **Internal contract:** the platform reads it straight from the App's port to render the App's API docs. Caddy never publishes it — `/apps/{name}/openapi.json` is an ordinary protected App route. |
 | `/b/` | Platform convention | Public bundle hosting prefix. Routes under `/b/` are served without `forward_auth` when `public_routes` includes this prefix in the manifest. Reserved so all apps using the public-bundle pattern use a consistent, well-known namespace. Do not use `/b/` for authenticated routes. |
 
@@ -125,8 +124,9 @@ An App's API docs are platform pages, never part of the App's own URL space. The
 |------|------|--------|-----------|------------|
 | Latarnia | `/docs` | `/openapi.json` | the platform API | any logged-in user |
 | UI API | `/docs/apps/{name}/ui` | `/api/docs/apps/{name}/ui` | App routes under `/api/` (server `/apps/{name}`) | role other than `none` on the App |
-| App REST API | `/docs/apps/{name}/rest` | `/api/docs/apps/{name}/rest` | App routes under `/rest/` (server `/rest/{name}`) | role other than `none` on the App, by session or Machine Token |
+| App REST API (**planned, not yet available**) | `/docs/apps/{name}/rest` | `/api/docs/apps/{name}/rest` | App routes under `/rest/` (server `/rest/{name}`) | role other than `none` on the App, by session or Machine Token |
 
+- The public `/rest/{name}/` path is not served yet (pitch I-0002 is still open), so the App REST API page documents an intended contract and its "Try it out" does not reach the App.
 - Only paths under `/api/` and `/rest/` are documented; other routes (`/health`, `/ui`, pages, `public_routes`) are not.
 - The dashboard shows an "API docs" button (→ `/docs`) and, on each running Service App tile, "UI API" / "REST API" buttons for the halves that have at least one route.
 - A half with no routes returns 404; a stopped App returns 503 ("App not running").
@@ -159,6 +159,8 @@ An App's API docs are platform pages, never part of the App's own URL space. The
 - **health**: Must be one of: `"good"`, `"warning"`, `"error"`
 - **message**: Short status description (max 100 characters)
 - **extra_info**: Optional object with key-value pairs for dashboard display
+
+**Known limitation:** the health monitor (`src/latarnia/managers/health_monitor.py`) currently probes `/health` only for Service Apps whose manifest sets `config.has_UI: true`. Other Service Apps are not probed: no automatic restart and no MCP liveness probe. A follow-up task will fix this.
 
 #### UI Endpoint (Optional)
 **Path**: `GET /ui`
@@ -321,7 +323,9 @@ platform (403) before your app sees the request.
 ## Redis Integration
 
 ### Overview
-Latarnia uses Redis as a message bus for inter-app communication and event publishing. Apps can publish events and subscribe to events from other apps.
+Latarnia provisions Redis for **App-to-App messaging over Redis Streams** (see "Redis Streams" below): that is the supported mechanism, and the only one the platform sets up, tracks and shows in the dashboard activity feed.
+
+The pub/sub patterns in the rest of this section (`latarnia:events:{event_type}` channels) are plain Redis between Apps that agree on a channel and message format. The platform does **not** subscribe to those channels, does not publish lifecycle events (App started/stopped) to Redis, and does not read the `events` manifest block described below. New Apps should use Streams.
 
 ### Connection
 Apps receive Redis connection via `--redis-url` parameter when `redis_required: true` in manifest.
@@ -398,7 +402,7 @@ for message in pubsub.listen():
 
 ### Event Declaration in Manifest
 
-Apps should declare the events they publish and subscribe to in their `latarnia.json` manifest. This provides self-documentation, enables validation, and helps with debugging.
+Apps may document the pub/sub events they use in an `events` block of `latarnia.json`. The platform ignores it (no validation or discovery); it is self-documentation only.
 
 **Example**:
 ```json
@@ -549,7 +553,7 @@ with open(config_file, 'r') as f:
 
 As of **P-0005 Scope 4**, apps no longer receive a `--logs-dir` argument. Apps log to **stdout/stderr** and the platform routes the streams:
 
-- **Linux** (per-app systemd user units): stdout/stderr → journald. Query with `journalctl --user -u latarnia-{env}-{app}.service`.
+- **Linux** (per-app systemd user units): stdout/stderr → journald. Query with `journalctl _SYSTEMD_USER_UNIT=latarnia-{env}-{app}.service` (system journal, no `--user`).
 - **macOS dev** (subprocess fallback): stdout/stderr → file at `/opt/latarnia/{env}/logs/{app_id}.log` (managed by `SubprocessLauncher`; the app does nothing).
 
 The dashboard's log panel queries `/api/apps/{app_id}/logs`, which dispatches to the right source automatically — apps don't need to know which OS they're on.
@@ -600,32 +604,38 @@ If enabled in the manifest config, the following are also passed:
 python main.py --port 8101 --redis-url redis://localhost:6379 --data-dir /opt/latarnia/{env}/data/{app_id}
 ```
 
-**Example Streamlit app use**:
-```bash
-streamlit run app.py --server.port 8501 --redis-url redis://localhost:6379 --data-dir /opt/latarnia/{env}/data/{app_id}
-```
+**Streamlit apps** are launched with the command line shown under App Types (only the Streamlit server flags are passed; no `--redis-url` or `--data-dir`).
 
 ## Environment Variables
 
-Apps can access these environment variables set by Latarnia:
+Apps get these environment variables from Latarnia:
 
-- `LATARNIA_APP_NAME`: The app's name from manifest
-- `LATARNIA_APP_VERSION`: The app's version
-- `LATARNIA_CONFIG_PATH`: Path to main Latarnia config (read-only)
-- `REDIS_HOST`: Redis server host (if redis_required: true)
-- `REDIS_PORT`: Redis server port (if redis_required: true)
-- `REDIS_PASSWORD`: Redis password if configured (if redis_required: true)
+- `ENV`: the environment name (`dev`, `tst`, `prd`), set in the generated systemd unit
+- `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`: set **only in the generated systemd unit** (Linux) and only when `redis_required: true` (`REDIS_PASSWORD` only if configured). Under the macOS subprocess fallback they are not set; the App inherits the platform's environment and gets the Redis URL via `--redis-url`.
+- `DATABASE_URL`: when `database: true` and provisioned (unit on Linux, process environment on macOS)
+- Declared Secrets (`requires_secrets`): from the per-App secrets file (Linux) or the process environment (macOS)
+
+There are no `LATARNIA_APP_*` or `LATARNIA_CONFIG_PATH` variables.
 
 **Note**: Prefer using command-line arguments over environment variables for configuration.
 
 ## Installation Process
 
-1. **Discovery**: Main app scans `./apps/` for `latarnia.json` files
-2. **Validation**: Validates manifest format and required fields
-3. **Dependencies**: Installs Python packages from requirements.txt
-4. **Setup**: Runs setup commands from manifest
-5. **Service Creation**: Creates systemd service file (Service apps only)
-6. **Registration**: Adds app to main app registry
+Two phases:
+
+**Discovery** (`discover_apps`, at platform start and on demand):
+1. Main app scans `./apps/` for `latarnia.json` (a legacy `homehelper.json` is accepted with a deprecation warning; a folder with neither is skipped, logged at DEBUG).
+2. Validates the manifest (required fields, name pattern, `mcp_port` rejected, `main_file` exists).
+3. Checks `requires`: each required App must be registered with at least `min_version`.
+4. Provisions the Postgres database and runs migrations (when `database: true`), and sets up Redis Streams (when declared).
+5. Registers the App in the in-memory App Registry with status `discovered`.
+
+**Preparation** (`POST /api/apps/{id}/prepare`):
+1. Installs Python packages from `requirements.txt`.
+2. Runs `install.setup_commands`.
+3. Allocates the App's port (Service Apps).
+
+The systemd unit file (Service Apps, Linux) is generated when the App is started.
 
 ## Service Management
 
@@ -633,7 +643,7 @@ App authors don't write systemd unit files — `ServiceManager` generates one pe
 
 ### Generated Unit Shape (informational)
 
-The platform writes per-app units under `~felipe/.config/systemd/user/latarnia-{env}-{app_id}.service`:
+The platform writes per-app units under `~{user}/.config/systemd/user/latarnia-{env}-{app_id}.service` (home of the user running the platform):
 
 ```ini
 [Unit]
@@ -661,7 +671,7 @@ WantedBy=default.target
 ```
 
 Notes:
-- **User-scope** unit (`systemctl --user`); no `User=` directive — the unit runs as the invoking user (felipe) by virtue of being user-scope.
+- **User-scope** unit (`systemctl --user`); no `User=` directive — the unit runs as the user running the platform by virtue of being user-scope.
 - **No `PartOf=`** — apps have independent lifetimes from the main platform and survive a `latarnia-{env}.service` restart. Reconciled at the next platform start.
 - **`Restart=on-failure`** by default (P-0005); overridable via `manifest.config.restart_policy` (`always` / `on-failure` / `never` → systemd's `no`).
 - `Environment=ENV={env}` is set so the app and the platform agree on the environment.
@@ -1008,7 +1018,7 @@ To enable MCP, set `mcp_server` to `true` in the `config` section of your `latar
 ```
 
 - **`mcp_server`** (bool): Set to `true` to declare that this app runs an MCP server.
-- The platform dynamically allocates an MCP port from the configured range (default 9001–9099) and passes it to the app via `--mcp-port` at launch.
+- The platform dynamically allocates an MCP port from the configured range (`process_manager.mcp_port_range` in `src/latarnia/core/config.py`) and passes it to the app via `--mcp-port` at launch.
 - **Do not** declare `mcp_port` in the manifest — manifests containing `mcp_port` are rejected at validation.
 
 ### Protocol Requirements
@@ -1155,8 +1165,8 @@ curl -N http://localhost:9001/sse
 Apps that declare `database: true` in their manifest receive an isolated Postgres database provisioned by the platform. The connection string is passed via `--db-url` at launch.
 
 ### What the Platform Provides
-- A dedicated database named `latarnia_{app_name}`
-- A dedicated role `latarnia_{app_name}_role` with LOGIN and CONNECT privileges
+- A dedicated database and role named from `postgres.database_prefix` / `postgres.role_prefix` and the App name (`-` mapped to `_`); see `DbProvisioner._generate_names` in `src/latarnia/managers/db_provisioner.py`. The role has LOGIN and CONNECT privileges on its own database only.
+- A stable role password stored by the platform and reused across restarts
 - Automatic migration execution on first discovery and version bumps
 - A `schema_versions` table in the app database tracking applied migrations
 
@@ -1177,7 +1187,7 @@ my_app/
 - Files must be named with a numeric prefix (e.g., `001_`, `002_`) for ordering
 - Migrations run in numeric order during a single transaction
 - Each migration runs exactly once — the platform tracks applied migrations via checksums
-- On failure: the transaction rolls back, the database is dropped and recreated, and the app is NOT started
+- On failure: the transaction rolls back and the app is NOT registered. If the database was created in that same run, it and its role are dropped (clean slate); an existing database is kept. A failed migration on a version bump marks the app `error` and keeps the database.
 - Migrations are forward-only — there is no rollback automation
 
 ### App Responsibilities
@@ -1241,7 +1251,7 @@ If a declared secret isn't set on the operator's master file, **the platform ref
 
 ### Operator-side contract
 
-Master file: `/opt/latarnia/{env}/secrets.env`, **mode 600** (owned by `felipe`).
+Master file: `/opt/latarnia/{env}/secrets.env`, **mode 600** (owned by the user running the platform).
 
 ```
 # /opt/latarnia/tst/secrets.env
@@ -1342,7 +1352,7 @@ Earlier versions silently accepted `requires_secrets` in `latarnia.json` and did
 ## Redis Streams (App-to-App Communication)
 
 ### Overview
-Redis Streams provide guaranteed-delivery, ordered messaging between apps. Unlike Redis Pub/Sub (used for platform events), Streams persist messages and support consumer groups.
+Redis Streams provide guaranteed-delivery, ordered messaging between apps. Unlike Redis Pub/Sub (which the platform does not use), Streams persist messages and support consumer groups.
 
 ### Declaration
 Apps declare their streams in the manifest:
@@ -1420,10 +1430,9 @@ Apps with `has_web_ui: true` serve their own HTTP-based web UI on their assigned
 - Headers added: `X-Forwarded-For`, `X-Forwarded-Proto`, `X-Forwarded-Host`
 
 ### Error Responses
-- App not found: 404
-- App not running: 503 with friendly error page
-- App has no web UI declared: 404
-- Connection timeout: 504
+Caddy only has a route block for a Service App that declares `has_web_ui`, is running and has an assigned port. There is no platform-rendered error page.
+- App not found, not running, or without a declared web UI: no route block, so `/apps/{name}/...` falls to the catch-all (login required, then the platform answers with its own 404)
+- App route exists but the connection to the App fails: Caddy returns 502
 
 ### Example
 A minimal web UI in a FastAPI app:
@@ -1455,7 +1464,7 @@ Full-featured service app demonstrating every platform capability:
 - MCP server exposing 3 tools (list_items, add_item, get_status); discoverable via the platform's MCP gateway.
 - Web UI (HTML page served by FastAPI at `/`); accessed through the platform's reverse proxy at `/apps/example_full_app/`.
 - Redis Streams publisher (`example.events.created`) and subscriber (`example.commands.process`).
-- REST API with `/health`, `/ui`, `/api/items`, `/api/events`.
+- REST API, public bundle route and App REST API route: see `examples/example_full_app/app.py` for the current route list.
 - Depends on `example_companion` >= 1.0.0.
 - Stdout-only logging (P-0005 Scope 4); platform routes stdout to journald on Linux.
 

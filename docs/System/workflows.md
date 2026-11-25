@@ -4,7 +4,7 @@ This document covers the main process flows and interaction patterns in Latarnia
 
 ## 1. Application Startup
 
-What happens when the Latarnia main application starts (the `lifespan` function in `main.py`).
+What happens when the Latarnia main application starts and stops (the `lifespan` function in `main.py`; the code is the source of truth for the order).
 
 ```mermaid
 flowchart TD
@@ -12,78 +12,91 @@ flowchart TD
     CreateDirs --> SetupLog[Setup logging]
     SetupLog --> CheckRedis{Redis running?}
 
-    CheckRedis -- Yes --> Discover[Scan ./apps/ directory]
+    CheckRedis -- Yes --> CheckPg
     CheckRedis -- No --> AutoStart[Attempt to start Redis<br/>via brew/systemctl]
-    AutoStart --> RedisOk{Redis started?}
-    RedisOk -- Yes --> Discover
-    RedisOk -- No --> LogWarn[Log error, continue without Redis]
-    LogWarn --> Discover
+    AutoStart --> CheckPg[Check Postgres connectivity<br/>log warning if unreachable]
 
-    Discover --> LingerCheck{Linux?}
-    LingerCheck -- Yes --> CheckLinger{linger_enabled?}
-    CheckLinger -- No --> WarnLinger[WARNING: linger disabled<br/>sudo loginctl enable-linger]
-    CheckLinger -- Yes --> Reconcile[ServiceManager.reconcile_running_units<br/>find active/activating latarnia-env-*.service units]
-    WarnLinger --> Reconcile
-    Reconcile --> ReconcileLoop{Next active unit?}
-    ReconcileLoop -- Found --> ParseUnit[Parse --port and --mcp-port<br/>from ExecStart line]
-    ParseUnit --> ClaimPorts[claim_port / claim_mcp_port<br/>in PortManager]
-    ClaimPorts --> MarkRunning[Mark app RUNNING in registry<br/>populate runtime_info.assigned_port<br/>and mcp_info.mcp_port]
-    MarkRunning --> ReconcileLoop
-    ReconcileLoop -- Done --> Loop
-    LingerCheck -- No --> Loop
+    CheckPg --> AuthDb{Postgres reachable?}
+    AuthDb -- Yes --> InitAuth[Create + migrate<br/>latarnia_platform_env DB]
+    AuthDb -- No --> SkipAuth[Skip auth DB init, log warning]
+    InitAuth --> Secrets[Check LATARNIA_TOTP_ENC_KEY and<br/>LATARNIA_JWT_SECRET, log error if missing]
+    SkipAuth --> Secrets
 
-    Loop{More apps<br/>to check?}
-    Loop -- Yes --> AutoCheck{Service app with<br/>auto_start = true?}
-    AutoCheck -- Yes --> AlreadyRunning{Already RUNNING<br/>from reconcile?}
-    AlreadyRunning -- Yes --> Loop
-    AlreadyRunning -- No --> PickLauncher[pick_launcher<br/>os + type → launcher]
-    PickLauncher --> StartApp[launcher.start_service]
-    AutoCheck -- No --> Loop
+    Secrets --> Linger{Linux and linger disabled?}
+    Linger -- Yes --> WarnLinger[WARNING: sudo loginctl enable-linger]
+    Linger -- No --> Discover
+    WarnLinger --> Discover
+
+    Discover[AppManager.discover_apps<br/>scan ./apps/, see section 2] --> Orphans[Clean up orphaned Apps<br/>whose folder was deleted]
+    Orphans --> Reconcile[ServiceManager.reconcile_running_units<br/>claim ports, mark surviving units RUNNING]
+    Reconcile --> Loop{Next Service App<br/>with auto_start = true?}
+
+    Loop -- Yes --> Skip{Already RUNNING, or declared<br/>Redis/Postgres unreachable?}
+    Skip -- Yes --> Loop
+    Skip -- No --> StartApp[pick_launcher then<br/>launcher.start_service]
     StartApp --> Loop
-    Loop -- No --> StartSub[Start Redis Event Subscriber<br/>psubscribe latarnia:events:*]
-    StartSub --> Ready([Application Ready])
+
+    Loop -- No --> Mcp[Initialize MCP Gateway and mount it,<br/>sync tools of running MCP Apps]
+    Mcp --> Caddy[Generate Caddyfile include and reload Caddy<br/>failure logged, not fatal]
+    Caddy --> StartSub[Start AsyncStreamConsumer<br/>for the activity feed]
+    StartSub --> StartHealth[Start HealthMonitor loop]
+    StartHealth --> Ready([Application Ready])
 
     Ready -.-> Shutdown([Shutdown Signal])
-    Shutdown --> StopSub[Stop Event Subscriber]
-    StopSub --> StopServices[Stop all managed service apps]
-    StopServices --> StopStreamlit[Stop all Streamlit apps]
+    Shutdown --> StopHealth[Stop HealthMonitor]
+    StopHealth --> StopSub[Stop AsyncStreamConsumer]
+    StopSub --> StopSvc[SubprocessLauncher.stop_all]
+    StopSvc --> StopStreamlit[StreamlitManager.stop_all]
     StopStreamlit --> Done([Shutdown Complete])
 ```
 
+Per-App systemd units have independent lifetimes, so they are not stopped at shutdown; `reconcile_running_units` re-adopts them on the next start.
+
 ## 2. App Installation and Discovery
 
-Decision logic when the App Manager scans the `./apps/` directory and processes each app folder.
+Decision logic when the App Manager scans the `./apps/` directory (`AppManager.discover_apps`). Discovery only **registers** an App in the in-memory App Registry; ports, dependency installation and `setup_commands` happen later in `prepare_app` (`POST /api/apps/{id}/prepare`). The registry is not persisted: it is rebuilt from the `apps/` folders on every start.
 
 ```mermaid
 flowchart TD
-    Trigger([Discover Apps called]) --> Scan[Scan ./apps/ directory<br/>for subdirectories]
+    Trigger([discover_apps called]) --> Scan[List ./apps/ subdirectories,<br/>Apps without requires first]
     Scan --> NextDir{Next directory?}
 
-    NextDir -- None left --> Persist[Persist registry to disk]
-    Persist --> Done([Return discovered count])
+    NextDir -- None left --> Done([Return count of new Apps])
 
-    NextDir -- Found --> HasManifest{latarnia.json<br/>exists?}
-    HasManifest -- No --> SkipDir[Skip directory, log warning]
+    NextDir -- Found --> HasManifest{latarnia.json exists?}
+    HasManifest -- No --> Legacy{homehelper.json exists?}
+    Legacy -- No --> SkipDir[Skip directory, log at DEBUG]
     SkipDir --> NextDir
+    Legacy -- Yes --> Deprecated[Log deprecation warning,<br/>use it as the manifest]
+    Deprecated --> Parse
 
-    HasManifest -- Yes --> Parse[Parse manifest JSON]
-    Parse --> Valid{Manifest valid?<br/>Required fields present?}
-    Valid -- No --> LogError[Log validation error]
+    HasManifest -- Yes --> Parse[Parse and validate manifest<br/>mcp_port rejected, main_file must exist]
+    Parse --> Valid{Manifest valid?}
+    Valid -- No --> LogError[Log error]
     LogError --> NextDir
 
-    Valid -- Yes --> AlreadyReg{Already in<br/>registry?}
-    AlreadyReg -- Yes --> NextDir
+    Valid -- Yes --> AlreadyReg{Already in registry<br/>by folder path?}
+    AlreadyReg -- Yes --> Bump{Version changed?}
+    Bump -- No --> NextDir
+    Bump -- Yes --> Update[Run pending migrations if DB provisioned,<br/>update manifest, status = DISCOVERED]
+    Update --> NextDir
 
-    AlreadyReg -- No --> AllocPort[Allocate port from<br/>8100-8199 range]
-    AllocPort --> PortOk{Port available?}
-    PortOk -- No --> LogPortErr[Log port allocation error]
-    LogPortErr --> NextDir
+    AlreadyReg -- No --> Requires{requires satisfied?<br/>App registered, min_version met}
+    Requires -- No --> LogReq[Log error, skip]
+    LogReq --> NextDir
 
-    PortOk -- Yes --> InstallDeps[Install requirements.txt<br/>via pip]
-    InstallDeps --> RunSetup[Run setup_commands<br/>from manifest]
-    RunSetup --> Register[Register app in registry<br/>with assigned port]
-    Register --> PublishEvent[Publish app_discovered<br/>event to Redis]
-    PublishEvent --> NextDir
+    Requires -- Yes --> HasDb{database: true?}
+    HasDb -- Yes --> Prov[DB Provisioner, see section 5]
+    Prov --> ProvOk{Success?}
+    ProvOk -- No --> NextDir
+    ProvOk -- Yes --> HasStreams
+    HasDb -- No --> HasStreams{redis_streams declared?}
+    HasStreams -- Yes --> Streams[Stream Manager, see section 6]
+    Streams --> StreamsOk{Success?}
+    StreamsOk -- No --> NextDir
+    StreamsOk -- Yes --> Register
+    HasStreams -- No --> Register[Register entry in the in-memory registry<br/>status = DISCOVERED, app_id from folder name]
+    Register --> NextDir
 ```
 
 ## 3. Dashboard UI Interaction
@@ -159,83 +172,94 @@ sequenceDiagram
 
 ## 4. Health Check Monitoring
 
-How the HealthMonitor periodically checks service app health and tracks failures.
+How the HealthMonitor periodically checks Service App health and handles failures. Interval, timeout, `failure_threshold`, `max_failures` and `startup_grace_period` are the `HealthCheckConfig` defaults in `src/latarnia/managers/health_monitor.py`.
 
 ```mermaid
 flowchart TD
-    Start([Health Monitor Started]) --> Wait[Wait for check interval<br/>default: 30 seconds]
-    Wait --> GetApps[Get all running<br/>service apps from registry]
-    GetApps --> NextApp{Next running<br/>service app?}
+    Start([Health Monitor Started]) --> Wait[Wait for check interval]
+    Wait --> GetApps[Select Service Apps that are RUNNING,<br/>or ERROR with a live process,<br/>and have config.has_UI true]
+    GetApps --> NextApp{Next App?}
 
     NextApp -- None left --> Wait
 
-    NextApp -- Found --> CallHealth[HTTP GET /health<br/>on app port]
-    CallHealth --> Timeout{Response within<br/>timeout?}
+    NextApp -- Found --> CallHealth[HTTP GET /health on the App port]
+    CallHealth --> Reply{Reply within timeout<br/>and HTTP 200?}
 
-    Timeout -- No --> IncFail[Increment consecutive<br/>failure count]
-    Timeout -- Yes --> ParseResp[Parse health response<br/>good / warning / error]
+    Reply -- Yes --> ParseResp[Parse health: good / warning / error]
+    ParseResp --> Ok{Status good or warning?}
+    Ok -- Yes --> ResetFail[Reset failure count,<br/>recover ERROR App to RUNNING,<br/>probe the MCP server if enabled]
+    ResetFail --> NextApp
+    Ok -- No --> Failure
 
-    ParseResp --> StatusGood{Status = good?}
-    StatusGood -- Yes --> ResetFail[Reset failure count]
-    ResetFail --> StoreResult[Store HealthCheckResult<br/>with response time]
-    StoreResult --> NextApp
-
-    StatusGood -- No --> StoreWarn[Store result with<br/>warning or error status]
-    StoreWarn --> NextApp
-
-    IncFail --> ThresholdCheck{Failures >= threshold?}
-    ThresholdCheck -- No --> StoreTimeout[Store result as UNKNOWN]
-    StoreTimeout --> NextApp
-    ThresholdCheck -- Yes --> MarkError[Mark app health as ERROR]
-    MarkError --> NextApp
+    Reply -- No --> Failure[Handle failure]
+    Failure --> Grace{Within startup grace period<br/>of started_at?}
+    Grace -- Yes --> Ignore[Ignore failure]
+    Ignore --> NextApp
+    Grace -- No --> IncFail[Increment consecutive failure count,<br/>store ERROR result]
+    IncFail --> Threshold{Failures >= failure_threshold?}
+    Threshold -- No --> NextApp
+    Threshold -- Yes --> MarkError[Mark App status ERROR]
+    MarkError --> Max{Failures >= max_failures?}
+    Max -- No --> NextApp
+    Max -- Yes --> Restart[ServiceManager.restart_service,<br/>reset failure count on success]
+    Restart --> NextApp
 ```
+
+A `warning` health status counts as success. Per-App restarts after repeated failures are done by the HealthMonitor through `ServiceManager.restart_service`; systemd's `Restart=on-failure` covers process crashes independently.
+
+**Known limitation:** the HealthMonitor currently selects only Service Apps whose manifest sets `config.has_UI: true` (`_perform_health_checks` in `health_monitor.py`). Service Apps without a UI are not probed: no automatic restart on failed health and no MCP liveness probe. A follow-up task will fix this.
 
 ## 5. Database Provisioning and Migration
 
-How the DB Provisioner creates a per-app Postgres database and executes pending migrations. Called during app discovery when `database: true`. References cap-003 and cap-004 in P-0002.
+How the DB Provisioner creates a per-app Postgres database and executes pending migrations (`DbProvisioner.provision_database`). Called during App discovery when `database: true`. References cap-003 and cap-004 in P-0002. The database and role names come from `db_provisioner._generate_names` (`postgres.database_prefix` / `postgres.role_prefix` in config, with `-` in the App name mapped to `_`).
 
 ```mermaid
 flowchart TD
-    Start([App has database: true]) --> CheckRole{Role exists?}
+    Start([App has database: true]) --> StoredPwd{Stored role password<br/>in data/.db_credentials?}
 
-    CheckRole -- No --> CreateRole[CREATE ROLE latarnia_{app}_role WITH LOGIN PASSWORD]
-    CheckRole -- Yes --> UpdatePwd[ALTER ROLE — rotate password]
-    CreateRole --> CheckDB{Database exists?}
-    UpdatePwd --> CheckDB
+    StoredPwd -- Yes --> RoleThere{Role exists?}
+    RoleThere -- Yes --> ReusePwd[Reuse stored password]
+    RoleThere -- No --> RecreateRole[CREATE ROLE with stored password]
+    StoredPwd -- No --> RoleExists{Role exists?}
+    RoleExists -- No --> CreateRole[CREATE ROLE with new random password]
+    RoleExists -- Yes --> UpdatePwd[ALTER ROLE, new random password]
+    CreateRole --> StorePwd[Store password, mode 600]
+    UpdatePwd --> StorePwd
 
-    CheckDB -- No --> CreateDB[CREATE DATABASE latarnia_{app} OWNER role]
-    CreateDB --> Revoke[REVOKE CONNECT FROM PUBLIC]
-    Revoke --> Grant[GRANT CONNECT TO role]
-    Grant --> SchemaTable[CREATE TABLE IF NOT EXISTS schema_versions]
-    CheckDB -- Yes --> SchemaTable
+    ReusePwd --> CheckDB{Database exists?}
+    RecreateRole --> CheckDB
+    StorePwd --> CheckDB
+
+    CheckDB -- No --> CreateDB[CREATE DATABASE OWNER role<br/>REVOKE CONNECT FROM PUBLIC, GRANT CONNECT to role]
+    CreateDB --> Ext
+    CheckDB -- Yes --> Ext[Ensure platform-default extensions]
+    Ext --> SchemaTable[CREATE TABLE IF NOT EXISTS schema_versions]
 
     SchemaTable --> ListFiles[List migrations/ directory,<br/>sort by numeric prefix]
     ListFiles --> QueryApplied[Query schema_versions for<br/>already-applied files]
     QueryApplied --> Pending{Pending migrations?}
 
-    Pending -- None --> BuildURL[Build connection_url for app]
-    BuildURL --> StoreInfo[Store DatabaseInfo in registry<br/>database_name, role_name, connection_url - in-memory only, never in API responses -, applied_migrations]
+    Pending -- None --> Grant
+    Pending -- Yes --> RunTx[Run all pending in one transaction]
+    RunTx --> SQLOk{All succeeded?}
+    SQLOk -- Yes --> Record[Record each in schema_versions,<br/>COMMIT]
+    Record --> Grant[GRANT privileges on tables and sequences to role]
+
+    Grant --> BuildURL[Build connection_url for the App]
+    BuildURL --> StoreInfo[Store DatabaseInfo in registry<br/>connection_url in-memory only, never in API responses]
     StoreInfo --> Done([Return ProvisioningResult success])
 
-    Pending -- Yes --> RunTx[BEGIN transaction on app DB]
-    RunTx --> NextMig{Next pending migration?}
-
-    NextMig -- Done --> CommitTx[COMMIT transaction]
-    CommitTx --> BuildURL
-
-    NextMig -- Found --> ExecSQL[Execute migration SQL]
-    ExecSQL --> SQLOk{SQL succeeded?}
-    SQLOk -- Yes --> RecordMig[INSERT into schema_versions<br/>file, number, checksum, duration_ms]
-    RecordMig --> NextMig
-
-    SQLOk -- No --> Rollback[ROLLBACK transaction]
-    Rollback --> DropDB[DROP DATABASE + DROP ROLE<br/>clean-slate teardown]
-    DropDB --> Fail([Return ProvisioningResult failure<br/>app NOT started])
+    SQLOk -- No --> Rollback[ROLLBACK]
+    Rollback --> WasNew{Database was created<br/>in this run?}
+    WasNew -- Yes --> DropDB[DROP DATABASE + DROP ROLE,<br/>delete stored password]
+    WasNew -- No --> KeepDB[Keep database and role]
+    DropDB --> Fail([Return failure, App NOT registered])
+    KeepDB --> Fail
 ```
 
 ## 6. Redis Streams Setup
 
-How the Stream Manager sets up streams and consumer groups during app discovery. Called after DB provisioning (if any). References cap-007 in P-0002.
+How the Stream Manager sets up streams and consumer groups during App discovery. Called after DB provisioning (if any). References cap-007 in P-0002.
 
 ```mermaid
 flowchart TD
@@ -243,26 +267,24 @@ flowchart TD
 
     PubLoop -- Done --> SubLoop{Next subscribe stream?}
 
-    PubLoop -- Stream name --> CheckOwner{Stream already<br/>has a publisher?}
+    PubLoop -- Stream name --> CheckOwner{Stream already has<br/>another publisher?}
     CheckOwner -- Yes --> CollisionErr[Raise PublisherCollisionError<br/>registration fails]
-    CheckOwner -- No --> CreateStream[XGROUP CREATE stream MKSTREAM<br/>create stream + delete temp group]
+    CheckOwner -- No --> CreateStream[Create stream if missing<br/>XADD sentinel entry then XDEL]
     CreateStream --> RecordOwner[Record stream_name → app_id<br/>in _publisher_map]
     RecordOwner --> PubLoop
 
     SubLoop -- Done --> StoreStreamInfo[Store StreamInfo in registry<br/>publish_streams, subscribe_streams, consumer_groups]
     StoreStreamInfo --> Done([Stream setup complete])
 
-    SubLoop -- Stream name --> EnsureStream{Stream exists?}
-    EnsureStream -- No --> CreateSubStream[Create stream via MKSTREAM]
-    EnsureStream -- Yes --> CreateGroup
-    CreateSubStream --> CreateGroup[XGROUP CREATE stream app_id $ MKSTREAM]
+    SubLoop -- Stream name --> EnsureStream[Create stream if missing]
+    EnsureStream --> CreateGroup[XGROUP CREATE stream app_id 0 MKSTREAM<br/>BUSYGROUP ignored]
     CreateGroup --> TrackGroup[Record group in _subscriber_groups]
     TrackGroup --> SubLoop
 ```
 
-On app **unregistration**, the Stream Manager calls `cleanup_app_streams(app_id)`:
-- Removes all consumer groups owned by the app from their streams.
-- Releases the app's publisher ownership entries from `_publisher_map`.
+The consumer group starts at id `0`, so a new subscriber also receives entries already in the stream. On App **unregistration**, the Stream Manager calls `cleanup_app(app_id)`:
+- Removes all consumer groups owned by the App from their streams.
+- Releases the App's publisher ownership entries from `_publisher_map`.
 - Does NOT delete streams — other consumers may still be reading from them.
 
 ## 7. MCP Gateway — Tool Discovery and Routing
@@ -348,39 +370,34 @@ flowchart TD
     Type -- Version bump --> FetchTools
 ```
 
-## 9. Redis Event Pub/Sub Flow
+## 9. Redis Streams Activity Feed
 
-How apps publish events through Redis and how the Latarnia event subscriber captures them for the dashboard activity feed.
+How App messages on Redis Streams reach the dashboard activity feed. App-to-App messaging uses Redis Streams only (no pub/sub); the platform reads the same streams through the `AsyncStreamConsumer` in `src/latarnia/core/event_subscriber.py`.
 
 ```mermaid
 sequenceDiagram
     participant AppA as App A<br/>(Publisher)
-    participant Redis as Redis<br/>(Message Bus)
-    participant Sub as Latarnia<br/>Event Subscriber
+    participant Redis as Redis Streams<br/>latarnia:streams:*
+    participant Cons as AsyncStreamConsumer<br/>(group latarnia-dashboard)
+    participant AppB as App B<br/>(Subscriber group)
     participant Store as Redis List<br/>latarnia:events:recent
-    participant AppB as App B<br/>(Subscriber)
+    participant WS as Dashboard WebSocket<br/>/ws/activity
     participant Dash as Dashboard API
 
-    Note over Sub: Background thread<br/>psubscribe latarnia:events:*
+    AppA->>Redis: XADD latarnia:streams:name {source, timestamp, data}
 
-    AppA->>Redis: PUBLISH latarnia:events:motion.detected<br/>{source, event_type, timestamp, data}
-
-    par Fan-out to all subscribers
-        Redis->>Sub: Deliver message to Latarnia subscriber
-        Redis->>AppB: Deliver message to App B subscriber
+    par Each consumer group reads independently
+        Redis->>Cons: XREADGROUP (SCAN finds all latarnia:streams:* keys)
+        Redis->>AppB: XREADGROUP with its own group
     end
 
-    Sub->>Sub: Parse JSON event
-    Sub->>Store: RPUSH event to recent events list
-    Sub->>Store: LTRIM to max_events (default 100)
+    Cons->>Store: RPUSH event record, LTRIM to max_events
+    Cons->>WS: Broadcast message to connected clients
+    Cons->>Redis: XACK
 
-    AppB->>AppB: Handle event in<br/>subscriber callback
-
-    Note over Dash,Store: Later, when user refreshes dashboard
-
+    Note over Dash,Store: Dashboard load (initial feed)
     Dash->>Store: LRANGE latarnia:events:recent
-    Store-->>Dash: Recent events list
-    Dash->>Dash: Format timestamps,<br/>extract messages
+    Store-->>Dash: Recent events (filtered per user role)
 ```
 
 ## 10. Role-Based App Tile Filtering and forward_auth Role Injection
@@ -401,7 +418,7 @@ sequenceDiagram
     Browser->>Caddy: GET / [Cookie: latarnia_session=abc]
     Caddy->>AV: GET /auth/verify [catch-all: no X-Latarnia-App]
     AV->>DB: Validate session hash
-    AV-->>Caddy: 200 [X-Latarnia-User: uid, X-Latarnia-Is-Super: false] (no App named, any logged-in user)
+    AV-->>Caddy: 200 [X-Latarnia-User: uid, X-Latarnia-Is-Super: false, X-Latarnia-App-Role: none] (no App named; role is full for a Superuser, none otherwise)
     Caddy->>Dash: GET /api/apps [X-Latarnia-User: uid, X-Latarnia-Is-Super: false]
     Dash->>RS: get_role(uid, app) for each app in registry
     Note over Dash: Filter: hide tiles where role = none<br/>Superuser bypasses filter (all apps visible, role = full)
@@ -443,7 +460,7 @@ sequenceDiagram
     Operator->>Dashboard: POST /api/auth/tokens {label, app_scope, expires_at}
     Dashboard->>Auth: (superuser session cookie required)
     Auth->>MTS: create(label, app_scope, expires_at, granted_by)
-    MTS->>MTS: Sign HS256 JWT {sub, iat, exp, apps, super}
+    MTS->>MTS: Sign HS256 JWT {sub, iat, jti, exp, apps, super}
     MTS->>DB: INSERT machine_tokens (token_hash=SHA256(jwt), app_scope, ...)
     MTS-->>Auth: raw JWT string
     Auth-->>Dashboard: {token: "<raw_jwt>"}
@@ -515,7 +532,7 @@ sequenceDiagram
     participant Browser as User Browser
     participant C as Caddy
     participant AV as /auth/verify<br/>(Latarnia :8000)
-    participant App as Service App<br/>:810x
+    participant App as Service App<br/>(assigned port)
 
     Note over Browser,App: Protected app page
 
@@ -537,8 +554,8 @@ sequenceDiagram
 
     Browser->>C: GET /apps/crm/dashboard [no valid session]
     C->>AV: GET /auth/verify
-    AV-->>C: 401 Unauthorized
-    C-->>Browser: 401 (redirects to /auth/login)
+    AV-->>C: 401 Unauthorized (no or expired session)
+    C-->>Browser: 302 redirect to /auth/login?next=/apps/crm/dashboard
 ```
 
 ```mermaid
@@ -546,16 +563,19 @@ flowchart TD
     Request([Incoming HTTPS request]) --> RouteMatch{Route match?}
 
     RouteMatch -- "/auth/*" --> PublicLatarnia[Proxy to Latarnia :8000<br/>no auth check]
-    RouteMatch -- "/apps/name/*" --> ForwardAuth[forward_auth to /auth/verify]
-    RouteMatch -- "/* catch-all (dashboard, /docs, /openapi.json)" --> ForwardAuthCatchAll[forward_auth to /auth/verify]
+    RouteMatch -- "/api/* and /mcp/*" --> NoFwd[Proxy to Latarnia :8000<br/>NO forward_auth; JWTAuthMiddleware / MCP Gateway<br/>accept a Bearer JWT or a session]
+    RouteMatch -- "/apps/name/public_route*<br/>(public_routes in manifest)" --> PublicApp[Strip /apps/name, strip X-Latarnia-* headers,<br/>proxy to App port, no auth]
+    RouteMatch -- "/apps/name/*" --> ForwardAuth[forward_auth to /auth/verify<br/>X-Latarnia-App: name]
+    RouteMatch -- "/* catch-all (dashboard, /docs)" --> ForwardAuthCatchAll[forward_auth to /auth/verify]
 
     ForwardAuth --> AuthOk{/auth/verify response?}
-    AuthOk -- 401 --> Deny[Return 401 to browser]
+    AuthOk -- 401 --> Redirect[302 redirect to /auth/login?next=original URL]
+    AuthOk -- 403 --> Deny[403 passed through to browser, no redirect]
     AuthOk -- 200 + headers --> StripPrefix[handle_path strips /apps/name prefix]
-    StripPrefix --> ProxyApp[Proxy to App port with<br/>X-Latarnia-* headers]
+    StripPrefix --> ProxyApp[Proxy to App port with<br/>X-Latarnia-* headers re-set from verify]
 
     ForwardAuthCatchAll --> AuthOkCatchAll{/auth/verify response?}
-    AuthOkCatchAll -- 401 --> DenyCatchAll[Return 401 to browser]
+    AuthOkCatchAll -- 401 --> RedirectCatchAll[302 redirect to /auth/login?next=original URL]
     AuthOkCatchAll -- 200 + headers --> ProxyLatarnia[Proxy to Latarnia :8000 with<br/>X-Latarnia-* headers]
 ```
 
@@ -563,12 +583,14 @@ flowchart TD
 
 How a logged-in user (or a Machine Token holder) reads an App's UI API and App REST API docs. The docs live in the platform's `/docs` namespace, behind login; an App's own `/docs` is never published. See `src/latarnia/web/api_docs.py`.
 
+The **App REST API** half documents a contract that is **planned, not yet available**: the public `/rest/{app}/` path it points to is not served by Caddy (pitch I-0002 is still open), so "Try it out" there does not reach the App. The UI API half is live.
+
 ```mermaid
 sequenceDiagram
     participant Browser as User Browser
     participant C as Caddy
     participant L as Latarnia :8000<br/>(API Docs router)
-    participant App as Service App<br/>:810x
+    participant App as Service App<br/>(assigned port)
 
     Browser->>C: GET /docs/apps/crm/rest [Cookie: latarnia_session]
     C->>L: forward_auth /auth/verify, then proxy (catch-all)
