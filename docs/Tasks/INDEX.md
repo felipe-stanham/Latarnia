@@ -29,3 +29,5 @@
 | [T-0025](T-0025.md) | A Machine Token cannot carry more than its owner's role | [DONE] |
 | [T-0026](T-0026.md) | Streamlit config keys — remove `streamlit_port`, wire `streamlit_ttl_seconds` | [ ] |
 | [T-0027](T-0027.md) | Health monitor probes every running Service App | [ ] |
+| [T-0028](T-0028.md) | MCP Tool Index includes running Apps after a platform restart | [ ] |
+| [T-0029](T-0029.md) | Remove dead MCP version-bump hook and Redis pub/sub leftovers | [ ] |
