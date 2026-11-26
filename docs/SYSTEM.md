@@ -14,7 +14,7 @@ Latarnia is a self-hosted platform for exposing Apps. An App is a folder with a 
 
 ## Cross-Project Constraints
 - Target hardware: Raspberry Pi 5, 8GB RAM, ARM64, Raspberry Pi OS — runs `dev`/`tst`/`prd`. Keep code arch-agnostic (each App builds its own venv on the host).
-- Tech stack: Python 3.9+, FastAPI, Bootstrap 5, Redis, Postgres (with `pgvector` enabled cluster-wide as a platform-default extension)
+- Tech stack: Python 3.10+, FastAPI, Bootstrap 5, Redis, Postgres (with `pgvector` enabled cluster-wide as a platform-default extension)
 - Port ranges: Main app on 8000 (`system.main_port`); Service Apps and MCP servers get ports from `process_manager.port_range` and `process_manager.mcp_port_range` (`src/latarnia/core/config.py`); Streamlit apps take their port from the same Service App range via `port_manager.allocate_port` (`process_manager.streamlit_port` is currently unused)
 - Environment port isolation (homeserver multi-env): each env's `config/config.json` sets its own non-overlapping ranges
 
@@ -58,7 +58,7 @@ MCP servers are configured in `.mcp.json` at the project root.
 
 ### Integration Test Fixtures
 
-`example_full_app` and `example_companion` (in `examples/`) are the integration test fixtures for the platform. They exercise every platform feature: Postgres DB with migrations, MCP server with tools, Redis Streams pub/sub, web UI proxy, and app dependencies. Any change to a platform feature must be accompanied by a corresponding update to `example_full_app` that exercises that feature.
+`example_full_app` and `example_companion` (in `examples/`) are the integration test fixtures for the platform. They exercise every platform feature: Postgres DB with migrations, MCP server with tools, Redis Streams, web UI proxy, and app dependencies. Any change to a platform feature must be accompanied by a corresponding update to `example_full_app` that exercises that feature.
 
 > **Source of truth:** `examples/` is committed to git. `apps/` is gitignored and populated from `examples/` during deployment. All changes to example apps must be made in `examples/`, never in `apps/`.
 
@@ -109,7 +109,7 @@ This section captures the V2 framing so it survives across sessions. Do **not** 
 ### What V2 would actually replace
 
 - **Supervision:** `health_monitor.py`'s restart logic (restarts a Service App after repeated failed health checks) → `Restart=on-failure` in systemd units. Delivered by P-0005 for process crashes; the health-based restart remains. Known limitation: the health monitor currently probes only Service Apps with `config.has_UI: true` (`health_monitor.py`).
-- **Logging:** per-app file logging in `logs/{app}/` → journald (queryable with `journalctl -u latarnia-{env}-{app}`). Largely delivered by P-0005.
+- **Logging:** Apps log to stdout/stderr; the platform routes that to journald on Linux (queryable on the system journal with `journalctl _SYSTEMD_USER_UNIT=latarnia-{env}-{app}.service`) or to a per-app log file on macOS dev. Largely delivered by P-0005.
 - **Reverse proxy:** `web_proxy.py` (custom async HTTP proxy with forwarded-headers logic) → Caddy site config per app, generated from the manifest. Deleted code: `web_proxy.py`, related tests, the `_build_forwarded_headers` helper.
 - **Two launcher paths:** the `ServiceManager` + `SubprocessLauncher` split remains (macOS dev still needs a fallback), but `/api/apps/{id}/process/*` can be fully deprecated in favor of `/api/services/{id}/*`.
 - **Parallel REST APIs:** collapse `/api/apps/{id}/process/*` and `/api/services/{id}/*` into one canonical lifecycle API.

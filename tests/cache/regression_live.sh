@@ -81,6 +81,32 @@ async def main():
 asyncio.run(main())
 PY
 curl -s $SU -o /dev/null -X DELETE $BASE/api/auth/tokens/$TID2
+echo "test_api_never_returns_db_password (T-0021; superuser, App id example-full-app)"
+DBPW=$($PY -c "import json; print(json.load(open('data/.db_credentials/latarnia_example_full_app_role.json'))['password'])" 2>/dev/null)
+if [ -z "$DBPW" ]; then echo "  FAIL role password not readable"; FAILS=$((FAILS+1)); else
+  for u in $BASE/api/apps $BASE/api/apps/example-full-app; do
+    R=$(curl -s -w '\n%{http_code}' $SU "$u"); check "$(basename "$u")_status" 200 "$(echo "$R" | tail -1)"
+    case "$R" in *"$DBPW"*) echo "  FAIL $u body contains the role password"; FAILS=$((FAILS+1));; *) echo "  ok   $u body has no role password";; esac
+  done
+  check single_app_db_keys "True|False|True" "$(curl -s $SU $BASE/api/apps/example-full-app | $PY -c "import sys,json; d=json.load(sys.stdin); d=d.get('app',d); i=d['database_info']; print('|'.join(str(x) for x in (all(k in i for k in ('database_name','role_name','applied_migrations')), 'connection_url' in i, bool(i['applied_migrations']))))")"
+  check list_db_keys "True|False" "$(echo "$APPS" | $PY -c "import sys,json; i=[a for a in json.load(sys.stdin)['apps'] if a['name']=='example_full_app'][0]['database_info']; print(all(k in i for k in ('database_name','role_name','applied_migrations')), 'connection_url' in i, sep='|')")"
+fi
+echo "test_token_scope_capped_by_owner_role (T-0025; t20-none has none, t20-low has webUI-low on example_full_app)"
+ntok() { curl -s $1 $BASE/api/auth/tokens | $PY -c "import sys,json; print(len(json.load(sys.stdin)['tokens']))"; }
+mint() { curl -s -w '\n%{http_code}' $1 -X POST -H 'content-type: application/json' -d "{\"label\":\"reg-cap\",\"app_scope\":$2}" $BASE/api/auth/tokens; }
+revoke_reg_cap() { for id in $(curl -s $1 $BASE/api/auth/tokens | $PY -c "import sys,json; print(' '.join(t['id'] for t in json.load(sys.stdin)['tokens'] if t['label']=='reg-cap' and not t['revoked_at']))"); do curl -s -o /dev/null $1 -X DELETE $BASE/api/auth/tokens/$id; done; }
+N0=$(ntok "$NONE"); R=$(mint "$NONE" '{"example_full_app":"webUI-full"}')
+check none_webui_full 403 "$(echo "$R" | tail -1)"
+echo "$R" | head -1 | grep -q "example_full_app" && echo "$R" | head -1 | grep -q "'none'" && echo "  ok   403 names App and role: $(echo "$R" | head -1)" || { echo "  FAIL 403 detail: $(echo "$R" | head -1)"; FAILS=$((FAILS+1)); }
+check none_no_token_created "$N0" "$(ntok "$NONE")"
+check low_webui_low 200 "$(mint "$LOW" '{"example_full_app":"webUI-low"}' | tail -1)"
+N1=$(ntok "$LOW")
+check low_webui_med 403 "$(mint "$LOW" '{"example_full_app":"webUI-med"}' | tail -1)"
+check low_webui_full 403 "$(mint "$LOW" '{"example_full_app":"webUI-full"}' | tail -1)"
+check low_mixed_one_over 403 "$(mint "$LOW" '{"example_full_app":"webUI-low","example_companion":"webUI-full"}' | tail -1)"
+check low_no_token_created "$N1" "$(ntok "$LOW")"
+check su_any_scope 200 "$(mint "$SU" '{"example_full_app":"webUI-full","example_companion":"full"}' | tail -1)"
+revoke_reg_cap "$LOW"; revoke_reg_cap "$SU"
 echo "test_live_none_role_blocked_at_ingress / test_live_role_reaches_app_webui (T-0023, through Caddy)"
 # Changes a user's role on the target, so it returns before any change unless the
 # target says it is tst or dev and INGRESS_USER is a readable non-superuser.

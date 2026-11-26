@@ -18,7 +18,7 @@ This specification defines the requirements for apps that integrate with the Lat
 - **Lifecycle**: Started on-demand when user opens UI, single instance only
 - **Port Assignment**: Allocated by the main app through `port_manager.allocate_port` from the Service App range (`process_manager.port_range`); released when the app stops
 - **TTL**: Automatically killed after an idle timeout, the hard-coded `default_ttl` in `src/latarnia/managers/streamlit_manager.py`. The config keys `process_manager.streamlit_port` and `process_manager.streamlit_ttl_seconds` currently have no effect
-- **Startup Command**: `python3 -m streamlit run {main_file} --server.port {configured_port} --server.headless true --browser.gatherUsageStats false --server.fileWatcherType none` (see `src/latarnia/managers/streamlit_manager.py`)
+- **Startup Command**: `python3 -m streamlit run {main_file} --server.port {allocated_port} --server.headless true --browser.gatherUsageStats false --server.fileWatcherType none` (see `src/latarnia/managers/streamlit_manager.py`)
 
 ## Common Requirements
 
@@ -471,7 +471,7 @@ For **subscribes**:
   - ❌ `camera-recording-started`
 
 #### Event Declaration
-- **Always declare events in manifest**: This enables discovery and validation
+- **Optionally document events in the manifest**: The platform ignores the `events` block (no discovery or validation); it is self-documentation only
 - **Keep schemas simple**: Only include essential data fields
 - **Document optional fields**: Mark optional fields in schema description
 - **Version your events**: If schema changes, consider using `motion.detected.v2`
@@ -511,7 +511,7 @@ For **subscribes**:
 ## Data and Logs Directories
 
 ### Overview
-Latarnia provides dedicated directories for each app to store persistent data and logs. These directories are managed by the main system and backed up automatically.
+Latarnia provides dedicated directories for each app to store persistent data and logs. The platform creates and manages the data directory; it does not back it up automatically.
 
 ### Data Directory (`--data-dir`)
 **Purpose**: Store persistent application data that needs to survive app restarts
@@ -719,7 +719,6 @@ my_sensor_app/
   "config": {
     "has_UI": true,
     "redis_required": true,
-    "logs_dir": true,
     "data_dir": true,
     "auto_start": true,
     "restart_policy": "always"
@@ -785,23 +784,13 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--port', type=int, required=True)
 parser.add_argument('--redis-url', type=str, required=False)
 parser.add_argument('--data-dir', type=str, required=False)
-parser.add_argument('--logs-dir', type=str, required=False)
 args = parser.parse_args()
 
-# Setup logging
-if args.logs_dir:
-    logs_dir = Path(args.logs_dir) / "temperature_monitor"
-    logs_dir.mkdir(parents=True, exist_ok=True)
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler(logs_dir / f"app_{datetime.now().strftime('%Y%m%d')}.log"),
-            logging.StreamHandler()
-        ]
-    )
-else:
-    logging.basicConfig(level=logging.INFO)
+# Setup logging: write to stderr; the platform routes it to journald or a log file
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 
 logger = logging.getLogger(__name__)
 
@@ -961,7 +950,7 @@ Before deploying to Latarnia, test your app locally:
 pip install -r requirements.txt
 
 # Run with test parameters
-python app.py --port 8100 --redis-url redis://localhost:6379 --data-dir ./test_data --logs-dir ./test_logs
+python app.py --port 8100 --redis-url redis://localhost:6379 --data-dir ./test_data
 
 # Test health endpoint
 curl http://localhost:8100/health
@@ -977,16 +966,14 @@ curl http://localhost:8100/api/readings/1
 ### Validation Checklist
 - [ ] Health endpoint returns valid JSON with required fields (`health`, `message`)
 - [ ] App starts successfully with all required arguments
-- [ ] Logs are written to logs directory (if `logs_dir: true`)
+- [ ] Logs are written to stdout/stderr
 - [ ] Data persists in data directory across restarts (if `data_dir: true`)
 - [ ] Redis events are published correctly (if `redis_required: true`)
-- [ ] Published events match declared schema in manifest
 - [ ] Event subscriptions work and handlers are called
 - [ ] All REST API endpoints return valid responses (if `/ui` implemented)
 - [ ] Error handling returns proper HTTP status codes
 - [ ] App handles missing optional arguments gracefully
 - [ ] latarnia.json manifest is valid JSON with all required fields
-- [ ] Event declarations in manifest match actual implementation
 - [ ] requirements.txt includes all necessary dependencies
 
 ### Common Issues
@@ -1026,7 +1013,7 @@ To enable MCP, set `mcp_server` to `true` in the `config` section of your `latar
 Apps that declare `mcp_server: true` must:
 
 1. **Accept `--mcp-port` CLI argument** — the platform passes the dynamically allocated MCP port at launch. The app must start its MCP server on this port.
-2. **Run an HTTP-based MCP server** on the allocated port. The server must use HTTP transport (`sse` or `streamable-http`). **stdio transport is not supported** by the platform.
+2. **Run an HTTP-based MCP server** on the allocated port. The server must use SSE transport (the MCP Gateway connects with the SSE client, so `streamable-http` does not work). **stdio transport is not supported** by the platform.
 3. **Respond to MCP `tools/list`** — return a list of tools the app provides, following the MCP protocol specification.
 4. **Respond to MCP `tools/call`** — execute a tool invocation and return the result, following the MCP protocol specification.
 5. **Be ready to receive MCP requests after `/health` returns `good`** — the platform health monitor will probe the MCP port only after the standard `/health` check passes.
@@ -1198,13 +1185,7 @@ my_app/
 
 ### Platform-Provided Postgres Extensions
 
-Every Latarnia-provisioned per-app database has the following extensions enabled automatically by the platform — apps do **not** need to `CREATE EXTENSION` in their migrations (the per-app role doesn't have privilege anyway):
-
-| Extension | Use case |
-|---|---|
-| `vector` (pgvector) | Vector similarity search — embeddings, RAG, semantic search |
-
-The list lives in `db_provisioner.py::DEFAULT_EXTENSIONS`. The platform runs `CREATE EXTENSION IF NOT EXISTS <ext>` for each on every provisioning pass (idempotent), so the list applies to both newly created and existing app DBs.
+Every Latarnia-provisioned per-app database has the platform-default extensions enabled automatically — apps do **not** need to `CREATE EXTENSION` in their migrations (the per-app role doesn't have privilege anyway). The extensions are listed in `db_provisioner.DEFAULT_EXTENSIONS` (see the source for the current set). The platform runs `CREATE EXTENSION IF NOT EXISTS <ext>` for each on every provisioning pass (idempotent), so the list applies to both newly created and existing app DBs.
 
 If an OS-level extension package isn't installed (e.g., `postgresql-17-pgvector` missing on the host), the platform logs a `WARNING` and continues — apps that don't need the extension are unaffected; apps that do need it will fail loudly at their own migration or runtime.
 
@@ -1460,8 +1441,8 @@ Minimal service app that serves as a dependency target. Contains only a `/health
 ### example_full_app
 Full-featured service app demonstrating every platform capability:
 - `latarnia.json` with all manifest fields (database, mcp_server, has_web_ui, redis_streams, requires).
-- `migrations/` directory with 3 SQL migration files.
-- MCP server exposing 3 tools (list_items, add_item, get_status); discoverable via the platform's MCP gateway.
+- `migrations/` directory with SQL migration files (see the example's `migrations/`).
+- MCP server exposing tools (see the example's `app.py`); discoverable via the platform's MCP gateway.
 - Web UI (HTML page served by FastAPI at `/`); accessed through the platform's reverse proxy at `/apps/example_full_app/`.
 - Redis Streams publisher (`example.events.created`) and subscriber (`example.commands.process`).
 - REST API, public bundle route and App REST API route: see `examples/example_full_app/app.py` for the current route list.

@@ -106,77 +106,39 @@ erDiagram
 
 ### System Metrics Schema
 
+System metrics are computed on request and never stored. `GET /api/system/metrics` returns `SystemMonitor.get_system_summary()` (`src/latarnia/utils/system_monitor.py`); the field lists of each part are defined there, not copied here. Redis status is a separate endpoint, `GET /api/system/redis`, served by the Redis monitor (not part of the summary); Postgres connectivity is `GET /api/system/postgres`.
+
 ```mermaid
 erDiagram
-    SYSTEM_METRICS {
-        datetime timestamp
+    SYSTEM_SUMMARY {
         object hardware
         object processes
-        object redis_status
+        string status
+        int timestamp
     }
-    
+
     HARDWARE {
         object cpu
         object memory
         object disk
         object temperature
+        int timestamp
     }
-    
-    CPU_METRICS {
-        float usage_percent
-        int count
-        array per_cpu_percent
+
+    PROCESSES {
+        int latarnia_count
+        array latarnia_processes
     }
-    
-    MEMORY_METRICS {
-        int total_mb
-        int available_mb
-        int used_mb
-        float percent
-    }
-    
-    DISK_METRICS {
-        int total_gb
-        int free_gb
-        int used_gb
-        float percent
-    }
-    
-    TEMPERATURE_METRICS {
-        float cpu_temp
-        string source
-    }
-    
-    PROCESS_INFO {
-        string name
-        int pid
-        float cpu_percent
-        int memory_mb
-        string status
-    }
-    
-    REDIS_STATUS {
-        string status
-        string host
-        int port
-        boolean connected
-        string error
-    }
-    
-    SYSTEM_METRICS ||--|| HARDWARE : contains
-    HARDWARE ||--|| CPU_METRICS : contains
-    HARDWARE ||--|| MEMORY_METRICS : contains
-    HARDWARE ||--|| DISK_METRICS : contains
-    HARDWARE ||--|| TEMPERATURE_METRICS : contains
-    SYSTEM_METRICS ||--o{ PROCESS_INFO : contains
-    SYSTEM_METRICS ||--|| REDIS_STATUS : contains
+
+    SYSTEM_SUMMARY ||--|| HARDWARE : contains
+    SYSTEM_SUMMARY ||--|| PROCESSES : contains
 ```
 
 ### Platform Auth Database Schema
 
 The platform owns a separate Postgres database — `latarnia_platform_{env}` (e.g., `latarnia_platform_dev`, `latarnia_platform_tst`, `latarnia_platform_prd`) — created and migrated by `AuthDB` (`src/latarnia/auth/db.py`) at Latarnia startup. This DB is **distinct from the per-app databases** provisioned by the DB Provisioner; it uses the platform's admin credentials and is never passed to App processes.
 
-Five tables live in this database. Migrations are in `src/latarnia/auth/migrations/001–007` and applied via the same sequential runner + `schema_versions` pattern used by the DB Provisioner.
+Five tables live in this database. Migrations are in the `src/latarnia/auth/migrations/` directory and applied via the same sequential runner + `schema_versions` pattern used by the DB Provisioner.
 
 ```mermaid
 erDiagram
@@ -240,7 +202,7 @@ erDiagram
 
 **Key field notes:**
 - `users.username`: normalization happens at a single boundary — `normalize_username()` in `src/latarnia/auth/users.py`, called from both `UserStore.create_user` and `UserStore.get_user_by_username`. Every read and every write is folded to lowercase there, so `routes.py` and `USERNAME_RE` are unchanged; mixed-case input is normalized rather than rejected.
-- `user_credentials.credential_data`: for TOTP, contains `{"totp_secret_enc": "<base64-nonce+ciphertext>"}`. The TOTP secret is encrypted with AES-256-GCM using `LATARNIA_TOTP_ENC_KEY` from `secrets.env`. Nonce is prepended to ciphertext.
+- `user_credentials.credential_data`: for TOTP, contains `{"totp_secret_enc": "<base64-nonce+ciphertext>", "last_totp_window": <int>}` (`last_totp_window` is the last accepted TOTP time window, for replay protection). The TOTP secret is encrypted with AES-256-GCM using `LATARNIA_TOTP_ENC_KEY` from `secrets.env`. Nonce is prepended to ciphertext.
 - `sessions.token_hash`: cookie value is a random UUIDv4 never persisted; only its SHA-256 hash is stored.
 - `app_roles.role` enum: `none`, `webUI-low`, `webUI-med`, `webUI-full`, `full`. Default effective role when no row exists: `none`. `full` is the only role granting REST API access.
 - `machine_tokens`: JWT claims carry `sub` (user_id), `iat`, `jti` (random, unique per token so `token_hash` never collides — T-0022), `exp`, `apps` (copy of `app_scope`), `super` (bool). Revocation check is a DB lookup on every API call. `revoked_at` is set on individual revocation, on user deactivation (`deactivate_user`), and on re-issue (`reissue_setup_token`); reactivation does NOT clear it.
@@ -250,7 +212,7 @@ erDiagram
 
 Each app with `database: true` receives its own Postgres database and role. Names are built by `DbProvisioner._generate_names` in `src/latarnia/managers/db_provisioner.py` from `postgres.database_prefix` / `postgres.role_prefix` and the App name (`-` mapped to `_`, lowercased). The platform creates the following tracking table in every provisioned database.
 
-**Platform-default extensions:** Every Latarnia-provisioned app DB has `vector` (pgvector) enabled by the platform at provisioning time. Apps using `vector(N)` columns or HNSW indexes do NOT need a `CREATE EXTENSION` migration — the per-app role doesn't have privilege anyway. The list lives in `db_provisioner.py::DEFAULT_EXTENSIONS`.
+**Platform-default extensions:** Every Latarnia-provisioned app DB has the extensions in `db_provisioner.DEFAULT_EXTENSIONS` enabled by the platform at provisioning time. Apps do NOT need a `CREATE EXTENSION` migration for those — the per-app role doesn't have privilege anyway. Check the source for the current list.
 
 ```mermaid
 erDiagram
@@ -357,7 +319,7 @@ latarnia:streams:{declared_name}   # App-to-App streams (see below)
 latarnia:events:recent             # Capped list: latest stream messages for the dashboard activity feed
 ```
 
-No other keys are written by the platform. There is no pub/sub traffic, no cached registry or config, no metrics in Redis, and no lifecycle events (App started/stopped) are published. The App Registry and port allocations are in memory.
+No other keys are written by the platform. The platform neither publishes nor subscribes to pub/sub channels (leftover pub/sub code — `RedisMessageBusClient`, `event_subscriber.channels`, and `example_full_app` publishing to `latarnia:events:app` — is unused and tracked by T-0029), no cached registry or config, no metrics in Redis, and no lifecycle events (App started/stopped) are published. The App Registry and port allocations are in memory.
 
 ### Redis Streams
 

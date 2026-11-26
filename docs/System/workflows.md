@@ -112,11 +112,11 @@ sequenceDiagram
     participant StMgr as Streamlit Manager
     participant StApp as Streamlit Process
 
-    User->>Dash: Open dashboard (GET /)
+    User->>Dash: Open dashboard (GET / redirects 302 to /dashboard)
+    Dash->>API: GET /health
     Dash->>API: GET /api/apps
-    Dash->>API: GET /api/system/metrics
-    Dash->>API: GET /api/activity/recent
-    API-->>Dash: App list, metrics, events
+    Dash->>API: GET /api/activity/recent?limit=10
+    API-->>Dash: Health, App list, recent events
     Dash-->>User: Render app cards + system status
 
     User->>Dash: Click Refresh button
@@ -146,7 +146,7 @@ sequenceDiagram
     Dash->>API: POST /api/apps/{id}/streamlit/launch
     API->>StMgr: Launch or get existing instance
     StMgr->>StApp: Spawn streamlit process (if needed)
-    StMgr-->>API: {url, port, ttl}
+    StMgr-->>API: {url, port, pid, status}
     API-->>Dash: Streamlit URL
     Dash-->>User: Open modal with iframe to Streamlit
 
@@ -336,6 +336,8 @@ sequenceDiagram
 
 How the gateway keeps the tool index in sync when apps start, stop, or undergo a version bump. References cap-006, cap-011.
 
+> **Known limitations (T-0028, T-0029):** at platform startup the gateway only syncs Apps already marked `mcp_info.healthy`, which the health monitor sets later, so auto-started or reconciled MCP Apps are missing from the Tool Index until restarted through the API (T-0028). `MCPGateway.on_app_version_bump` has no call site, so the "Version bump" branch below is not wired today (T-0029).
+
 ```mermaid
 flowchart TD
     Event([App lifecycle event]) --> Type{Event type?}
@@ -402,7 +404,7 @@ sequenceDiagram
 
 ## 10. Role-Based App Tile Filtering and forward_auth Role Injection
 
-How the dashboard filters app tiles server-side by role and how `/auth/verify` injects per-app role headers into every forwarded request. References cap-015, cap-016, flow-03 in P-0008.
+How the dashboard filters app tiles server-side by role and how `/auth/verify` injects per-app role headers into forwarded App requests. References cap-015, cap-016, flow-03 in P-0008.
 
 ```mermaid
 sequenceDiagram
@@ -415,11 +417,13 @@ sequenceDiagram
 
     Note over Browser,Dash: Dashboard load — server-side tile filtering
 
-    Browser->>Caddy: GET / [Cookie: latarnia_session=abc]
+    Browser->>Caddy: GET /dashboard [Cookie: latarnia_session=abc]
     Caddy->>AV: GET /auth/verify [catch-all: no X-Latarnia-App]
     AV->>DB: Validate session hash
-    AV-->>Caddy: 200 [X-Latarnia-User: uid, X-Latarnia-Is-Super: false, X-Latarnia-App-Role: none] (no App named; role is full for a Superuser, none otherwise)
-    Caddy->>Dash: GET /api/apps [X-Latarnia-User: uid, X-Latarnia-Is-Super: false]
+    AV-->>Caddy: 200 (page load allowed)
+    Caddy->>Dash: GET /dashboard
+    Browser->>Dash: GET /api/apps [Cookie: latarnia_session=abc] (Caddy: no forward_auth on /api/*)
+    Note over Dash: Auth middleware resolves identity from the session cookie or a Bearer JWT
     Dash->>RS: get_role(uid, app) for each app in registry
     Note over Dash: Filter: hide tiles where role = none<br/>Superuser bypasses filter (all apps visible, role = full)
     Dash-->>Browser: App list (only apps with role != none)
@@ -454,12 +458,13 @@ sequenceDiagram
     participant MTS as MachineTokenStore
     participant DB as latarnia_platform_{env}
     actor Client as Machine Client
+    participant MW as JWTAuthMiddleware
 
     Note over Operator,DB: Token creation (one-time, any logged-in user; scope capped by the caller's own roles)
 
     Operator->>Dashboard: POST /api/auth/tokens {label, app_scope, expires_at}
     Dashboard->>Auth: (session cookie required; non-superuser scope checked against own roles)
-    Auth->>MTS: create(label, app_scope, expires_at, granted_by)
+    Auth->>MTS: create_token(user_id, label, app_scope, is_super, granted_by, expires_at)
     MTS->>MTS: Sign HS256 JWT {sub, iat, jti, exp, apps, super}
     MTS->>DB: INSERT machine_tokens (token_hash=SHA256(jwt), app_scope, ...)
     MTS-->>Auth: raw JWT string
@@ -469,15 +474,15 @@ sequenceDiagram
     Note over Client,DB: API call with Bearer token
 
     Client->>Client: GET /api/apps\nAuthorization: Bearer <jwt>
-    Note over Client: JWTAuthMiddleware intercepts all /api/* requests
-
-    Client->>Client: JWTAuthMiddleware.validate_jwt(token)
-    Client->>DB: SELECT machine_tokens WHERE token_hash=SHA256(jwt) AND revoked_at IS NULL
+    Client->>MW: GET /api/apps [Authorization: Bearer jwt]
+    Note over MW: JWTAuthMiddleware intercepts all /api/* requests
+    MW->>MW: JWTAuth.validate(token)
+    MW->>DB: MachineTokenStore.is_active(token_hash): a record exists and is not revoked
     alt JWT invalid, expired, or revoked
-        Client-->>Client: 401 Unauthorized
+        MW-->>Client: 401 Unauthorized
     else Valid
-        Client->>Client: Extract app_scope from JWT claims
-        Client-->>Client: 200 OK (response filtered to apps in scope)
+        MW->>MW: Attach JWT claims (app_scope) to the request
+        MW-->>Client: 200 OK (response filtered to apps in scope)
     end
 
     Note over Operator,DB: Token management

@@ -24,16 +24,21 @@ out=$(PYTHONPATH=src "$PY" -m pytest tests/integration/test_caddy_forward_auth.p
 last=$(printf '%s\n' "$out" | tail -1); echo "real-chain: $last"
 if printf '%s\n' "$last" | grep -qE ' passed' && ! printf '%s\n' "$last" | grep -qE 'skipped|failed|error'; then
   echo "PASS test_real_chain_per_app_authz"; else echo "FAIL test_real_chain_per_app_authz"; RC=1; fi
-# 3) Task suites behind TESTS.md entries: T-0021 (DB password), T-0023 (per-App authz), T-0024 (App name pattern)
+# 3) Task suites behind TESTS.md entries: T-0021 (DB password), T-0023 (per-App authz),
+#    T-0024 (test_app_name_pattern), T-0025 (test_token_scope_capped_by_owner_role).
+#    t25 007 is the task-time diff against the pre-T-0025 test file; the full suite in 1) covers its
+#    "suite green" half, so only 001-006 run here.
 bash tests/cache/t21_run.sh || RC=1
 bash tests/cache/t23_run.sh || RC=1
-bash tests/cache/t24_run.sh 001 002 003 004 || RC=1
+MANIFEST_ROOT="$PWD" bash tests/cache/t24_run.sh 001 002 003 004 || RC=1
+bash tests/cache/t25_run.sh 001 002 003 004 005 006 || RC=1
 # 4) Dashboard JS function entries
 node tests/cache/regression_dashboard_js.js || RC=1
 # 5) T-0020 API docs entries (Caddyfile + role gating) and live API/MCP/token entries
 for t in t20_001 t20_002 t20_004 t20_005 t20_006 t20_007; do bash tests/cache/$t.sh >/dev/null 2>&1 && echo "PASS $t" || { echo "FAIL $t"; RC=1; }; done
 bash tests/cache/regression_live.sh || RC=1
-# 6) Playwright Dashboard / App Web UI entries (superuser session from the t20 fixture)
+# 6) Playwright Dashboard / App Web UI entries (superuser session from the t20 fixture;
+#    test_app_web_ui_opens_in_modal also starts a local real-caddy ingress from caddy/latarnia.caddyfile)
 eval "$(PYTHONPATH=src "$PY" tests/cache/t20_fixture.py secrets.env 2>/dev/null)"
 S_SU="${S_SU:-}" "$PY" tests/cache/regression_playwright.py || RC=1
 exit $RC
