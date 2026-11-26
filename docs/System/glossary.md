@@ -75,7 +75,7 @@ This file is the single source of truth for domain vocabulary across this projec
 
 ### App Manager
 
-**Definition:** The platform component responsible for scanning the `apps/` directory, parsing Manifests, installing Python dependencies, allocating ports, and populating the App Registry on startup and manual refresh.
+**Definition:** The platform component responsible for scanning the `apps/` directory, parsing Manifests, and registering Apps in the App Registry on startup and manual refresh. Dependency installation, `setup_commands`, and port allocation happen later, when an App is prepared and launched.
 
 ---
 
@@ -88,7 +88,7 @@ This file is the single source of truth for domain vocabulary across this projec
 
 ### DB Provisioner
 
-**Definition:** The platform component that creates a per-App Postgres database and role, enables platform-default extensions (currently `vector`), and executes pending Migrations during App discovery. Tears down the database on initial provisioning failure (clean-slate). Maps to `db_provisioner.py`.
+**Definition:** The platform component that creates a per-App Postgres database and role, enables the platform-default extensions (`DEFAULT_EXTENSIONS` in `db_provisioner.py`), and executes pending Migrations during App discovery. Tears down the database on initial provisioning failure (clean-slate). Maps to `db_provisioner.py`.
 
 ---
 
@@ -133,7 +133,7 @@ This file is the single source of truth for domain vocabulary across this projec
 
 ### Stream Manager
 
-**Definition:** The platform component that provisions Redis Streams and consumer groups for Apps during discovery, enforces the one-publisher-per-stream rule, and cleans up streams on App unregistration. Maps to `stream_manager.py`.
+**Definition:** The platform component that provisions Redis Streams and consumer groups for Apps during discovery, enforces the one-publisher-per-stream rule, and on App unregistration destroys the App's consumer groups and releases its publisher ownership (streams themselves are not deleted). Maps to `stream_manager.py`.
 
 ---
 
@@ -147,7 +147,7 @@ This file is the single source of truth for domain vocabulary across this projec
 
 ### Tool Index
 
-**Definition:** The in-memory map maintained by the MCP Gateway, keyed by `"{app_name}.{tool_name}"`, recording each tool's originating App, MCP port, and schema. Rebuilt from running Apps on platform startup; not persisted to disk.
+**Definition:** The in-memory map maintained by the MCP Gateway, keyed by `"{app_name}.{tool_name}"`, recording each tool's originating App, MCP port, and schema. Built from running MCP-enabled Apps as they start; not persisted to disk.
 
 ---
 
