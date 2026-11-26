@@ -1,47 +1,34 @@
 #!/bin/bash
-# PreToolUse hook: blocks git push if source files changed but docs/System/ was not updated.
-# Receives tool input as JSON on stdin.
+# Docs gate: on `git push`, deny when unpushed commits change source files but neither
+# touch the hand-written docs in docs/System/ nor carry a "Docs-Checked: no-changes" trailer.
+# The generated system map (docs/System/map.md, docs/System/map/) does not count: a rebuild
+# touches it without anyone reviewing the prose. `build.py --check` verifies it instead.
+# Unpushed = since the upstream, or since the fork point from dev on a branch's first push.
+. "$(dirname "$0")/lib/common.sh"
 
-COMMAND=$(python3 -c "
-import sys, json
-try:
-    data = json.load(sys.stdin)
-    print(data.get('tool_input', {}).get('command', ''))
-except Exception:
-    print('')
-")
+hook_runs_git push || exit 0
+REPO="$(hook_git_dir)"
+git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || exit 0
 
-# Only intercept git push
-if ! echo "$COMMAND" | grep -qE "git\s+push"; then
-    exit 0
+if git -C "$REPO" rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1; then
+  BASE='@{u}'
+else
+  BASE="$(git -C "$REPO" merge-base HEAD origin/dev 2>/dev/null || git -C "$REPO" merge-base HEAD dev 2>/dev/null)"
+  [ -n "$BASE" ] || exit 0
 fi
+RANGE="$BASE..HEAD"
 
-# If no upstream exists yet (first push), allow it
-if ! git rev-parse @{u} &>/dev/null 2>&1; then
-    exit 0
-fi
+CHANGED="$(git -C "$REPO" log "$RANGE" --name-only --pretty=format: 2>/dev/null | grep -v '^$' | sort -u)"
+[ -n "$CHANGED" ] || exit 0
 
-# Count unpushed commits that touch source files vs docs/System/
-UNPUSHED_SRC=$(git log @{u}..HEAD --name-only --pretty=format: 2>/dev/null \
-    | grep -v "^docs/System" \
-    | grep -v "^\.claude" \
-    | grep -v "^$" \
-    | wc -l | tr -d ' ')
+# Planning docs, template files, and root markdown (MEMORY.md, TESTS.md, ...) are not source.
+SRC_COUNT="$(printf '%s\n' "$CHANGED" | grep -vE '^(docs/|\.claude/|\.githooks/|\.gitignore$|[^/]+\.md$)' | grep -c .)"
+[ "$SRC_COUNT" -eq 0 ] && exit 0
 
-UNPUSHED_DOCS=$(git log @{u}..HEAD --name-only --pretty=format: 2>/dev/null \
-    | grep "^docs/System" \
-    | wc -l | tr -d ' ')
+printf '%s\n' "$CHANGED" | grep '^docs/System/' | grep -qvE '^docs/System/(map\.md$|map/)' && exit 0
+git -C "$REPO" log "$RANGE" --format=%B | grep -qiE '^Docs-Checked:[[:space:]]*no-changes' && exit 0
 
-# No source changes → nothing to document, allow push
-if [ "$UNPUSHED_SRC" -eq 0 ]; then
-    exit 0
-fi
-
-# Source changed but docs/System/ not touched → block and ask Claude to run doc-updater
-if [ "$UNPUSHED_DOCS" -eq 0 ]; then
-    echo "BLOCKED: $UNPUSHED_SRC source file(s) changed in unpushed commits but docs/System/ has no updates."
-    echo "Invoke the @doc-updater agent to update docs/System/ before pushing."
-    exit 1
-fi
-
-exit 0
+deny "$SRC_COUNT source file(s) changed in unpushed commits but docs/System/ has no updates
+(the generated map does not count). Run the doc-updater agent and commit its changes. If it
+reports that no documentation needs to change, add its trailer to the commit message:
+\"Docs-Checked: no-changes — <reason>\"."

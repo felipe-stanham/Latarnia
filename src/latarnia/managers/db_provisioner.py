@@ -45,7 +45,7 @@ class ProvisioningResult:
     success: bool
     database_name: Optional[str] = None
     role_name: Optional[str] = None
-    connection_url: Optional[str] = None
+    connection_url: Optional[str] = field(default=None, repr=False)  # holds the password
     applied_migrations: List[str] = field(default_factory=list)
     error_message: Optional[str] = None
 

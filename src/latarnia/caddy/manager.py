@@ -20,7 +20,7 @@ Caddyfile structure (see P-0008/architecture.md):
   - `/auth/*`                              → Latarnia, no auth
   - `/api/*`, `/mcp/*`                     → Latarnia, auth enforced inside (Bearer JWT or session)
   - `/apps/{name}/{public_route}*`         → app, no auth, identity headers stripped
-  - `/apps/{name}/*`                        → app webUI, forward_auth + proxy
+  - `/apps/{name}/*`                        → app webUI, forward_auth + proxy (identity headers re-set)
   - `/*`                                    → dashboard, `/docs` (API docs), forward_auth
 
 API docs are platform pages under `/docs` (T-0020); an App's `/docs` and
@@ -39,8 +39,9 @@ import httpx
 
 from ..core.config import ConfigManager
 
-# Headers Caddy copies from /auth/verify onto the proxied request.
-_COPY_HEADERS = "X-Latarnia-User X-Latarnia-App-Role X-Latarnia-Is-Super"
+# Identity headers /auth/verify returns; Caddy copies them onto the proxied request.
+_IDENTITY_HEADERS = ("X-Latarnia-User", "X-Latarnia-App-Role", "X-Latarnia-Is-Super")
+_COPY_HEADERS = " ".join(_IDENTITY_HEADERS)
 
 
 class CaddyConfigManager:
@@ -99,7 +100,7 @@ class CaddyConfigManager:
     # Generation
     # ------------------------------------------------------------------
 
-    def _forward_auth_lines(self, local: str) -> List[str]:
+    def _forward_auth_lines(self, local: str, app_name: Optional[str] = None) -> List[str]:
         """Session-cookie `forward_auth` guard block (8-space indent).
 
         On a 2xx from `/auth/verify` the request proceeds to the route's
@@ -109,11 +110,26 @@ class CaddyConfigManager:
         there (spec.md:79-80; workflows.md flow-04). Only 401 is matched —
         an app-level 403 (logged in, wrong role) must not redirect-loop to
         login.
+
+        Caddy tells `/auth/verify` which App is asked (T-0023): the block
+        generated for `/apps/{app_name}/*` sends `X-Latarnia-App: {app_name}`
+        on the request to /auth/verify (replacing any client value there), so
+        the App checked is always the App the request is routed to, whatever
+        the request-target form. The catch-all block (`app_name=None`) deletes
+        any client-sent `X-Latarnia-App` on the request to /auth/verify. These
+        `header_up` lines do not touch the request proxied to the App — the
+        App's own `reverse_proxy` deletes `X-Latarnia-App` (see
+        `generate_config`).
         """
+        if app_name is not None:
+            app_header = f"            header_up X-Latarnia-App {app_name}"
+        else:
+            app_header = "            header_up -X-Latarnia-App"
         return [
             f"        forward_auth {local} {{",
             "            uri /auth/verify",
             f"            copy_headers {_COPY_HEADERS}",
+            app_header,
             "            @auth_denied status 401",
             "            handle_response @auth_denied {",
             "                redir * /auth/login?next={http.request.orig_uri} 302",
@@ -187,7 +203,8 @@ class CaddyConfigManager:
             # Public declared routes (no forward_auth). Caddy's handle (not
             # handle_path) preserves the path matcher, then uri strip_prefix
             # removes /apps/{name} so the app receives its own root-relative
-            # path (e.g. /apps/x/b/foo → /b/foo). Identity headers stripped.
+            # path (e.g. /apps/x/b/foo → /b/foo). Identity headers stripped,
+            # and `X-Latarnia-App` (a Caddy → verify header, T-0023) too.
             for prefix in pub_routes:
                 lines.append(f"    handle /apps/{name}{prefix}* {{")
                 lines.append(f"        uri strip_prefix /apps/{name}")
@@ -195,12 +212,28 @@ class CaddyConfigManager:
                 lines.append("            header_up -X-Latarnia-User")
                 lines.append("            header_up -X-Latarnia-App-Role")
                 lines.append("            header_up -X-Latarnia-Is-Super")
+                lines.append("            header_up -X-Latarnia-App")
                 lines.append("        }")
                 lines.append("    }")
-            # Protected: app webUI
+            # Protected: app webUI. The App's reverse_proxy re-sets the identity
+            # headers (T-0023). forward_auth's copy_headers puts verify's values
+            # on the request; reverse_proxy then clones it and, in its hop-by-hop
+            # cleanup, deletes every header the client named in `Connection`
+            # — so `Connection: close, X-Latarnia-App-Role` would strip the
+            # role before the App sees it. `header_up` runs on that clone after
+            # the cleanup, and `{http.request.header.*}` reads the original
+            # request, which still holds the values copy_headers set. The App
+            # always receives what verify returned. `X-Latarnia-App` is a
+            # Caddy → verify header: forward_auth's `header_up` sets it only on
+            # the request to /auth/verify, so a client-sent copy is deleted here
+            # before it reaches the App.
             lines.append(f"    handle_path /apps/{name}/* {{")
-            lines.extend(self._forward_auth_lines(local))
-            lines.append(f"        reverse_proxy {app_local}")
+            lines.extend(self._forward_auth_lines(local, app_name=name))
+            lines.append(f"        reverse_proxy {app_local} {{")
+            for header in _IDENTITY_HEADERS:
+                lines.append(f"            header_up {header} {{http.request.header.{header}}}")
+            lines.append("            header_up -X-Latarnia-App")
+            lines.append("        }")
             lines.append("    }")
 
         # Catch-all: dashboard, API docs (/docs, /openapi.json, /docs/apps/...)

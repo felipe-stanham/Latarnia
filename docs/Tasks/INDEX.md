@@ -22,3 +22,12 @@
 | [T-0018](T-0018.md) | Remove the decommissioned Hetzner prd host from workflow + docs | [DONE] |
 | [T-0019](T-0019.md) | App tiles show why an App is in warning or error | [DONE] |
 | [T-0020](T-0020.md) | API docs move to the platform's `/docs` namespace, behind login | [DONE] |
+| [T-0021](T-0021.md) | App API responses leak the App's Postgres password | [DONE] |
+| [T-0022](T-0022.md) | Machine Token fixes — superuser 401 on `/api/apps/{id}`, same-second JWT collision | [DONE] |
+| [T-0023](T-0023.md) | Per-App authorization — `/auth/verify` rejects role `none`; UI API proxy checks access and forwards identity | [DONE] |
+| [T-0024](T-0024.md) | App names follow a safe pattern | [DONE] |
+| [T-0025](T-0025.md) | A Machine Token cannot carry more than its owner's role | [DONE] |
+| [T-0026](T-0026.md) | Streamlit config keys — remove `streamlit_port`, wire `streamlit_ttl_seconds` | [ ] |
+| [T-0027](T-0027.md) | Health monitor probes every running Service App | [ ] |
+| [T-0028](T-0028.md) | MCP Tool Index includes running Apps after a platform restart | [ ] |
+| [T-0029](T-0029.md) | Remove dead MCP version-bump hook and Redis pub/sub leftovers | [ ] |

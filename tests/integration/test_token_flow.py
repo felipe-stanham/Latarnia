@@ -79,7 +79,7 @@ def ctx(monkeypatch):
         users.activate_user(u["id"])
         return u, sessions.create_session(u["id"])
 
-    yield {"client": client, "users": users, "tokens": tokens,
+    yield {"client": client, "users": users, "tokens": tokens, "roles": roles,
            "jwt": jwt_auth, "make_user": make_user}
     pg.drop_database(TEST_DB)
 
@@ -118,7 +118,10 @@ def test_token_scope_enforced(ctx):
     # cap-020: a non-super token scoped to app_a -> app_b is 403.
     # (A superuser token carries super=true and is intentionally unscoped.)
     client = ctx["client"]
+    admin, _ = ctx["make_user"]("admin", is_superuser=True)
     bob, bob_token = ctx["make_user"]("bob")
+    # T-0025: a non-superuser token cannot exceed its owner's role on the App.
+    ctx["roles"].set_role(bob["id"], "app_a", "webUI-med", granted_by=admin["id"])
     client.cookies.clear()
     raw = client.post("/api/auth/tokens",
                       json={"label": "scoped", "app_scope": {"app_a": "webUI-med"}},
@@ -170,3 +173,94 @@ def test_session_cookie_also_authorizes_gated_endpoint(ctx):
     _bob, bob_token = ctx["make_user"]("bob")
     client.cookies.clear()
     assert client.get("/api/ping", cookies={COOKIE: bob_token}).status_code == 200
+
+
+def test_identical_same_second_mints_both_succeed(ctx, monkeypatch):
+    # T-0022 (t22-006): identical inputs in the same second used to produce the
+    # same JWT, failing UNIQUE(token_hash) with a 500. `jti` makes each distinct.
+    from types import SimpleNamespace
+    import latarnia.auth.jwt_auth as jwt_auth_module
+    monkeypatch.setattr(jwt_auth_module, "time", SimpleNamespace(time=lambda: 1_760_000_000))
+    client = ctx["client"]
+    admin, admin_token = ctx["make_user"]("admin", is_superuser=True)
+    raws = []
+    for _ in range(2):
+        client.cookies.clear()
+        r = client.post("/api/auth/tokens",
+                        json={"label": "twin", "app_scope": {"app_a": "full"}},
+                        cookies={COOKIE: admin_token})
+        assert r.status_code == 200
+        raws.append(r.json()["token"])
+    assert raws[0] != raws[1]
+    assert ctx["jwt"].token_hash(raws[0]) != ctx["jwt"].token_hash(raws[1])
+    client.cookies.clear()
+    listing = client.get("/api/auth/tokens", cookies={COOKIE: admin_token}).json()["tokens"]
+    assert sum(t["label"] == "twin" for t in listing) == 2
+
+
+def _mint(ctx, token, scope, label="x"):
+    ctx["client"].cookies.clear()
+    return ctx["client"].post("/api/auth/tokens",
+                              json={"label": label, "app_scope": scope},
+                              cookies={COOKIE: token})
+
+
+def _listed(ctx, token):
+    ctx["client"].cookies.clear()
+    return ctx["client"].get("/api/auth/tokens", cookies={COOKIE: token}).json()["tokens"]
+
+
+def test_token_cannot_exceed_owner_role_none(ctx):
+    # t25-001: role `none` on app_a -> cannot mint webUI-full for it.
+    bob, bob_token = ctx["make_user"]("bob")
+    r = _mint(ctx, bob_token, {"app_a": "webUI-full"})
+    assert r.status_code == 403
+    assert "app_a" in r.json()["detail"] and "none" in r.json()["detail"]
+    assert _listed(ctx, bob_token) == []
+
+
+def test_token_capped_at_owner_role(ctx):
+    # t25-002: webUI-med on app_a -> med and low allowed, webUI-full rejected.
+    admin, _ = ctx["make_user"]("admin", is_superuser=True)
+    bob, bob_token = ctx["make_user"]("bob")
+    ctx["roles"].set_role(bob["id"], "app_a", "webUI-med", granted_by=admin["id"])
+    assert _mint(ctx, bob_token, {"app_a": "webUI-med"}).status_code == 200
+    assert _mint(ctx, bob_token, {"app_a": "webUI-low"}).status_code == 200
+    assert _mint(ctx, bob_token, {"app_a": "webUI-full"}).status_code == 403
+    assert len(_listed(ctx, bob_token)) == 2
+
+
+def test_one_over_cap_entry_rejects_whole_scope(ctx):
+    # t25-003: app_a within cap, app_b over cap -> 403 and no token is created.
+    admin, _ = ctx["make_user"]("admin", is_superuser=True)
+    bob, bob_token = ctx["make_user"]("bob")
+    ctx["roles"].set_role(bob["id"], "app_a", "webUI-med", granted_by=admin["id"])
+    r = _mint(ctx, bob_token, {"app_a": "webUI-low", "app_b": "webUI-low"})
+    assert r.status_code == 403
+    assert "app_b" in r.json()["detail"]
+    assert _listed(ctx, bob_token) == []
+
+
+def test_non_superuser_with_full_role_still_cannot_mint_full(ctx):
+    # t25-004: the existing `full` rule is kept even when the role is `full`.
+    admin, _ = ctx["make_user"]("admin", is_superuser=True)
+    bob, bob_token = ctx["make_user"]("bob")
+    ctx["roles"].set_role(bob["id"], "app_a", "full", granted_by=admin["id"])
+    r = _mint(ctx, bob_token, {"app_a": "full"})
+    assert r.status_code == 403
+    assert r.json()["detail"] == "Only a superuser can issue a token with the 'full' role"
+
+
+def test_superuser_token_scope_unchanged(ctx):
+    # t25-005: superusers are not capped.
+    admin, admin_token = ctx["make_user"]("admin", is_superuser=True)
+    r = _mint(ctx, admin_token, {"app_a": "webUI-full", "app_b": "full"})
+    assert r.status_code == 200
+    assert "token" in r.json()
+
+
+def test_non_superuser_unknown_app_and_empty_scope(ctx):
+    # t25-006: unknown app -> 403 (own role is none); empty scope -> 200.
+    bob, bob_token = ctx["make_user"]("bob")
+    assert _mint(ctx, bob_token, {"unknown_app": "webUI-low"}).status_code == 403
+    assert _mint(ctx, bob_token, {}).status_code == 200

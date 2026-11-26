@@ -40,8 +40,8 @@ graph TB
             APIDocs[API Docs router<br/>/docs/apps/... pages + schemas]
         end
 
-        subgraph "Message Bus"
-            Redis[(Redis<br/>Port 6379)]
+        subgraph "Redis Streams"
+            Redis[(Redis Streams<br/>Port 6379)]
         end
 
         subgraph "systemd --user (Linux, linger on)"
@@ -50,10 +50,10 @@ graph TB
         end
 
         subgraph "Applications"
-            SvcApp1[Service App 1<br/>Port 8100-8199]
-            SvcApp2[Service App 2<br/>Port 8100-8199]
-            StreamlitApp1[Streamlit App 1<br/>Port 8501+]
-            StreamlitApp2[Streamlit App 2<br/>Port 8501+]
+            SvcApp1[Service App 1<br/>assigned port]
+            SvcApp2[Service App 2<br/>assigned port]
+            StreamlitApp1[Streamlit App 1<br/>Port from Service App range]
+            StreamlitApp2[Streamlit App 2<br/>Port from Service App range]
         end
 
         subgraph "System Services"
@@ -99,16 +99,15 @@ graph TB
     FastAPI --> Router
     FastAPI --> UIMgr
     FastAPI --> SysMon
-    AuthVerify --> AppMgr
 
     Router -->|Linux + service| SvcMgr
     Router -->|Darwin + service| SubLaunch
     Router -->|any + streamlit| UIMgr
 
     CaddyMgr --> CaddyFile
-    CaddyMgr -->|POST /load Caddy admin API| CaddyHTTPS
+    CaddyMgr -->|caddy reload| CaddyHTTPS
 
-    AppMgr --> Redis
+    AppMgr -->|stream setup| Redis
     SvcMgr -.systemctl --user.-> UA
     SvcMgr -.systemctl --user.-> UB
     UA -->|ExecStart venv python| SvcApp1
@@ -148,10 +147,9 @@ graph TB
 - **Responsibilities**:
   - Auto-discovery of apps in `./apps/` directory
   - Manifest parsing (`latarnia.json`)
-  - In-memory app registry with persistence
-  - Dynamic port allocation (8100-8199 range)
-  - Python dependency installation
-  - App validation and setup
+  - In-memory app registry (not persisted; rebuilt by `discover_apps()` from the `apps/` folders on every start)
+  - Discovery-time provisioning of declared resources (Postgres database, Redis Streams) and `requires` checks
+  - Preparation on `POST /api/apps/{id}/prepare` (`prepare_app`): Python dependency installation, `setup_commands`, port allocation from the range configured at `process_manager.port_range` (`src/latarnia/core/config.py`)
 
 ### 3. Launch Router
 - **Purpose**: Stateless dispatch function (`pick_launcher`) that selects the correct launcher for each app based on `(platform.system(), manifest.type)`
@@ -186,8 +184,8 @@ graph TB
 - **Purpose**: On-demand Streamlit application management
 - **Responsibilities**:
   - Streamlit process spawning
-  - TTL-based cleanup (default 300 seconds)
-  - Port management for Streamlit apps
+  - TTL-based idle cleanup (`default_ttl` in `src/latarnia/managers/streamlit_manager.py`; the config keys `process_manager.streamlit_port` and `process_manager.streamlit_ttl_seconds` currently have no effect)
+  - Port allocation for Streamlit apps via `port_manager.allocate_port(app_id, 'streamlit')` from the Service App range (`process_manager.port_range`)
   - Modal integration with main dashboard
   - Resource monitoring and cleanup
 
@@ -208,9 +206,9 @@ graph TB
 - **Responsibilities**:
   - Build and maintain a namespaced tool index (`app_name.tool_name`)
   - Proxy `list_tools` responses from the in-memory index
-  - Proxy `call_tool` requests to the appropriate app's MCP server (localhost on declared `mcp_port`)
+  - Proxy `call_tool` requests to the appropriate app's MCP server (localhost on the port allocated by `PortManager.allocate_mcp_port`, held in `MCPInfo.mcp_port`)
   - Skip unhealthy apps on tool calls (return error immediately)
-  - Sync tool index on app start, stop, and version bump
+  - Sync tool index on app start and stop (the version-bump hook `on_app_version_bump` exists but is not called — T-0029; startup sync misses Apps not yet marked healthy — T-0028)
   - Enforce backward compatibility on version bumps (set-difference check; reject and stop app on violation)
   - Expose `GET /api/mcp/status` and `GET /api/mcp/tools` REST endpoints
 
@@ -220,13 +218,13 @@ graph TB
 - **Responsibilities**:
   - Generate per-app names: `{database_prefix}{app_name}` and `{role_prefix}{app_name}_role`.
   - Create role + database if absent; revoke `PUBLIC` connect; grant connect to the per-app role.
-  - **Ensure platform-default extensions** via `CREATE EXTENSION IF NOT EXISTS <ext>` for every entry in `DEFAULT_EXTENSIONS` (currently `["vector"]` for pgvector). Idempotent — runs on both new and reused DBs so existing app DBs get backfilled at the next provisioning pass. Missing OS-level binaries log a `WARNING`, not a failure.
+  - **Ensure platform-default extensions** via `CREATE EXTENSION IF NOT EXISTS <ext>` for every entry in `db_provisioner.DEFAULT_EXTENSIONS`. Idempotent — runs on both new and reused DBs so existing app DBs get backfilled at the next provisioning pass. Missing OS-level binaries log a `WARNING`, not a failure.
   - Create the `schema_versions` tracking table.
   - Run pending migrations from the app's `migrations/*.sql` directory in numeric order, in a single transaction; record file name + sha256 checksum + duration.
-  - Drop database + role on initial provisioning failure (clean slate) — but preserve them on version-bump migration failure.
+  - Drop database + role when a migration fails and the database was created in that run (clean slate) — but preserve them when the database already existed and on version-bump migration failure.
   - Grant `ALL PRIVILEGES ON ALL TABLES / SEQUENCES IN SCHEMA public` to the per-app role after migrations so the app can use objects created by the superuser.
-  - Build the connection URL passed to apps via `--db-url env:DATABASE_URL` + `Environment=DATABASE_URL=...` in the systemd unit.
-- **Extensions list (`DEFAULT_EXTENSIONS`)**: append-only, hardcoded today. `vector` was added for embeddings / RAG / semantic search. Adding more (postgis, citext, etc.) is a one-line edit; if per-app extension overrides ever become needed, refactor to manifest-driven at that point.
+  - Build the connection URL passed to apps via `--db-url env:DATABASE_URL` + `Environment=DATABASE_URL=...` in the systemd unit. The URL (`DatabaseInfo.connection_url`) carries the App role password, so it is held in memory only: `DatabaseInfo.to_dict()` omits it (no App API response includes it) and it is `repr=False` on `DatabaseInfo` and `ProvisioningResult`. Only the Service Manager and Subprocess Launcher read it, to inject `DATABASE_URL`.
+- **Extensions list (`DEFAULT_EXTENSIONS`)**: a hardcoded list in `db_provisioner.py`; the source is the authority on its current contents. Adding an extension is a one-line edit; if per-app extension overrides ever become needed, refactor to manifest-driven at that point.
 
 ### 10. Secret Manager
 - **Purpose**: Inject runtime secrets (API keys, tokens) into per-app process environments without leaking values to logs, unit files, or other apps. Owns the per-env master secret store and per-app filtered files (P-0006).
@@ -236,18 +234,16 @@ graph TB
 - **Linux injection**: generated systemd unit references the per-app file via `EnvironmentFile=-/opt/latarnia/{env}/secrets/{app_id}.env` (leading `-` = ignore-if-missing).
 - **Darwin injection**: filtered key/value map merged into `subprocess.Popen(env=...)`; no file written.
 - **Refuse-to-start gate**: runs before port allocation in both launchers. On missing key, sets `app.runtime_info.error_message = "missing required secret: <name>"`, marks app `ERROR`, returns `False`. Surfaces as `overall_status: red` via the existing P-0005 cap-005 plumbing — no new fields.
-- **REST**: `GET /api/secrets` returns `[{name, set_at, used_by: [app_id, ...]}]`. **Never** returns values. Listing is read-only; rotation is `$EDITOR` + restart consuming apps.
+- **REST**: `GET /api/secrets` returns `{env, secrets: [{name, set_at, used_by: [app_id, ...]}]}`. **Never** returns values. Listing is read-only; rotation is `$EDITOR` + restart consuming apps.
 - **Logging contract**: no method on this manager ever logs a secret value. Verified by a sentinel-value unit test.
 - **Out of v1**: encryption at rest, audit log, rotation automation, CLI binary, dashboard panel, multi-line values, cross-env sharing.
 
-### 11. Redis Message Bus
-- **Purpose**: Inter-app communication and event system
+### 11. Redis Streams
+- **Purpose**: App-to-App messaging over Redis Streams (`latarnia:streams:*`), and the source of the dashboard activity feed
 - **Responsibilities**:
-  - Pub/Sub messaging between apps
-  - Event logging and history
-  - Health monitoring data
-  - Configuration change notifications
-  - App status updates
+  - Stream and consumer-group setup at App discovery (`StreamManager`, `src/latarnia/managers/stream_manager.py`): one publisher per stream, one consumer group per subscribing App
+  - Platform consumer (`AsyncStreamConsumer`, `src/latarnia/core/event_subscriber.py`): reads every `latarnia:streams:*` stream as group `latarnia-dashboard`, keeps the latest messages in the `latarnia:events:recent` list, and pushes them to `/ws/activity`
+- No pub/sub is used, and the platform does not publish lifecycle events (App started/stopped) to Redis.
 
 ### 12. Caddy Ingress
 - **Purpose**: Caddy (systemd system service) is the single external HTTPS ingress and reverse proxy. The platform's own Python web proxy (`web_proxy.py`) was removed in P-0008.
@@ -259,9 +255,11 @@ graph TB
   - `/apps/{name}/*` — protected via `forward_auth` to `/auth/verify`; Caddy strips the `/apps/{name}` prefix with `handle_path` before proxying to app port (Service Apps only; Streamlit Apps have no Caddy route block)
   - `/*` catch-all — protected via `forward_auth`; proxied to Latarnia `:8000` (dashboard, platform `/docs` and `/openapi.json`, API docs pages, and other browser routes). Any logged-in user can open them; the API docs router applies the per-App role check.
   - Apps' own `/docs` and `/openapi.json` are **not** published publicly (T-0020): `/apps/{name}/docs` and `/apps/{name}/openapi.json` are ordinary protected App routes, and the platform serves App API docs itself (component 14).
-- **Auth headers copied**: `X-Latarnia-User`, `X-Latarnia-App-Role`, `X-Latarnia-Is-Super`
-- **CaddyConfigManager** (`src/latarnia/caddy/manager.py`): reads the App Registry, generates the per-environment Caddyfile include at `/opt/latarnia/{env}/caddy/latarnia.caddyfile`, then reloads Caddy via `POST /load` on the Caddy admin API (`:2019`). Called on every App registration change.
-- **Firewall**: `ufw` blocks Latarnia `:8000` and app ports `:81xx` / `:90xx` from external access — all external traffic enters through Caddy only.
+- **Auth headers copied**: `X-Latarnia-User`, `X-Latarnia-App-Role`, `X-Latarnia-Is-Super`. In each protected `/apps/{name}/*` block the App's `reverse_proxy` re-sets them from verify's values (so a client `Connection` header cannot strip them).
+- **App identification for verify**: each per-App `forward_auth` block sends `X-Latarnia-App: {name}` to `/auth/verify`; the catch-all deletes it. Verify does not read `X-Forwarded-Uri`. `X-Latarnia-App` is a Caddy → verify header only: protected and public-route blocks delete it before the request reaches the App. Verify returns 403 ("No access to this app") when the caller's role is `none`; Caddy passes the 403 through.
+- **UI API proxy**: `/api/apps/{app_id}/ui/*` endpoints enforce the same per-App access as `GET /api/apps/{id}` (session role via `RoleStore`, or Machine Token scope; 401/403) and forward the three `X-Latarnia-*` headers to the App.
+- **CaddyConfigManager** (`src/latarnia/caddy/manager.py`): reads the App Registry, generates the per-environment Caddyfile include at `/opt/latarnia/{env}/caddy/latarnia.caddyfile`, then reloads Caddy with `caddy reload --config /etc/caddy/Caddyfile` so every imported per-env section is re-read together. Only when the `caddy` binary or that file is missing (single-env dev) does it fall back to `POST /load` on the Caddy admin API. Called on every App registration change.
+- **Firewall**: `ufw` blocks Latarnia `:8000` and the App ports from external access — all external traffic enters through Caddy only.
 
 ### 13. Auth Components (P-0008 Scopes 2–4)
 
@@ -271,15 +269,15 @@ These components implement persistent authentication, authorization, and machine
 - **AuthProvider / TOTPAuthProvider** (`src/latarnia/auth/providers/`): `AuthProvider` is a Protocol defining `setup_credentials`, `validate`, and `get_setup_form_spec`. `TOTPAuthProvider` is the V1 implementation — generates TOTP secrets, encrypts them with AES-256-GCM (key from `LATARNIA_TOTP_ENC_KEY` in `secrets.env`), and validates TOTP codes.
 - **UserStore** (`src/latarnia/auth/users.py`): User CRUD — create user with setup token, list, deactivate. The first user created via `/auth/setup` becomes the superuser.
 - **SessionStore** (`src/latarnia/auth/sessions.py`): Session create/validate/expire. Cookie value is a random UUIDv4; only its SHA-256 hash is stored. Expired sessions are lazily garbage-collected at login time.
-- **RoleStore** (`src/latarnia/auth/roles.py`): Per-app role lookup and assignment over the `app_roles` table. Role enum: `none | webUI-low | webUI-med | webUI-full | full`. Superuser is a user attribute (not a per-app role) and always resolves to `full`. `is_visible(role)` returns false for `none`, controlling dashboard tile visibility. Role management API: `GET /api/auth/roles`, `GET /api/auth/roles/all` (superuser), `POST /api/auth/roles/{app}` (superuser).
-- **JWTAuth / MachineTokenStore** (`src/latarnia/auth/jwt_auth.py`, `tokens.py`): Signs and validates HS256 JWTs (key: `LATARNIA_JWT_SECRET` from `secrets.env`). JWT claims: `{sub, iat, exp, apps, super}`. `MachineTokenStore` persists tokens to the `machine_tokens` table (SHA-256 of raw JWT stored, never plaintext) and supports create/list/revoke. Token management API: `POST /api/auth/tokens`, `GET /api/auth/tokens`, `DELETE /api/auth/tokens/{id}`.
+- **RoleStore** (`src/latarnia/auth/roles.py`): Per-app role lookup and assignment over the `app_roles` table. Role enum: `none | webUI-low | webUI-med | webUI-full | full`. Superuser is a user attribute (not a per-app role) and always resolves to `full`. `is_visible(user, app_name)` returns false when the user's role on the App is `none` (Superusers and unauthenticated dev access see all), controlling dashboard tile visibility. Role management API: `GET /api/auth/roles`, `GET /api/auth/roles/all` (superuser), `POST /api/auth/roles/{app}` (superuser).
+- **JWTAuth / MachineTokenStore** (`src/latarnia/auth/jwt_auth.py`, `tokens.py`): Signs and validates HS256 JWTs (key: `LATARNIA_JWT_SECRET` from `secrets.env`). JWT claims: `{sub, iat, jti, exp, apps, super}` (`jti` is random per token, so identical mints never share a hash — T-0022). A `super` claim grants every App on `/api/apps` and `/api/apps/{id}`; otherwise `apps` scopes access. `MachineTokenStore` persists tokens to the `machine_tokens` table (SHA-256 of raw JWT stored, never plaintext) and supports create/list/revoke. Token management API: `POST /api/auth/tokens`, `GET /api/auth/tokens`, `DELETE /api/auth/tokens/{id}`.
 - **JWTAuthMiddleware** (`src/latarnia/auth/middleware.py`): Pure-ASGI middleware that gates all `/api/*` requests. Accepts either a `Bearer <jwt>` (validated + revocation-checked against `machine_tokens`) or a session cookie. Passes `/mcp` and websocket connections through without session-cookie gating — the MCP Gateway validates its own JWT. Returns 401 on any other unauthenticated request to `/api/*`.
 - **Auth Routes** (`src/latarnia/auth/routes.py`): FastAPI router mounting `/auth/*` (login, setup, logout — browser flows) and `/api/auth/*` (user management, role management, machine token management — JSON API). The `/auth/verify` endpoint is the Caddy `forward_auth` target; it validates the session hash, looks up the per-app role via `RoleStore`, and returns `X-Latarnia-User`, `X-Latarnia-App-Role`, and `X-Latarnia-Is-Super` headers.
 
 ### 14. API Docs (T-0020)
 - **Purpose**: Platform-owned Swagger docs for each Service App's APIs, served from the platform's `/docs` namespace instead of the App's own URL space.
 - **Module**: `src/latarnia/web/api_docs.py` (`build_api_docs_router(app_manager, role_store, session_resolver)`), included in `main.py`.
-- **Behaviour**: fetches the App's internal `/openapi.json` straight from its registry port (never published by Caddy), splits it by path prefix — `/api/` is the **UI API**, `/rest/` is the **App REST API** — prunes component schemas the half does not reference (`securitySchemes` are kept so "Authorize" still works), and rewrites `servers` to `/apps/{name}` (UI API) or `/rest/{name}` (App REST API; paths re-rooted under that server URL) so "Try it out" hits the public path.
+- **Behaviour**: fetches the App's internal `/openapi.json` straight from its registry port (never published by Caddy), splits it by path prefix — `/api/` is the **UI API**, `/rest/` is the **App REST API** — prunes component schemas the half does not reference (`securitySchemes` are kept so "Authorize" still works), and rewrites `servers` to `/apps/{name}` (UI API) or `/rest/{name}` (App REST API; paths re-rooted under that server URL) so "Try it out" hits the public path. The `/rest/{name}` public path is **planned, not yet served** (pitch I-0002 is still open; Caddy has no route for it), so the App REST API half documents an intended contract and "Try it out" there does not reach the App yet.
 - **Routes**:
 
 | Route | Returns | Auth path |
@@ -314,7 +312,7 @@ graph LR
     
     subgraph "System Integration"
         systemd[systemd user unit<br/>latarnia-{env}-{app_id}.service]
-        Redis[Redis Pub/Sub]
+        Redis[Redis Streams]
         Storage[/opt/latarnia/{env}/data/{app_id}/]
         Journal[journald<br/>system journal]
     end
@@ -349,13 +347,13 @@ graph LR
     end
     
     subgraph "Runtime Management"
-        TTL[TTL Manager<br/>300s default]
+        TTL[TTL Manager<br/>idle TTL = default_ttl in streamlit_manager.py]
         Process[Process Spawning]
         Cleanup[Resource Cleanup]
     end
     
     subgraph "System Integration"
-        Redis[Redis Pub/Sub]
+        Redis[Redis Streams]
         Storage[/opt/latarnia/{env}/data/{app_id}/]
         Logs[/opt/latarnia/{env}/logs/{app_id}-streamlit.log]
     end
@@ -394,22 +392,30 @@ Apps log to stdout/stderr only; they no longer receive a `--logs-dir` flag. The 
 sequenceDiagram
     participant AM as App Manager
     participant FS as File System
-    participant Reg as App Registry
-    participant Redis as Redis
-    
+    participant DB as DB Provisioner
+    participant SM as Stream Manager
+    participant Reg as App Registry (in-memory)
+
     AM->>FS: Scan ./apps/ directory
     FS->>AM: Return app directories
-    
-    loop For each app directory
-        AM->>FS: Read latarnia.json
+
+    loop For each app directory (Apps without requires first)
+        AM->>FS: Read latarnia.json (homehelper.json as deprecated fallback)
         FS->>AM: Return manifest data
-        AM->>AM: Validate manifest
-        AM->>Reg: Register app
-        AM->>Redis: Publish app_discovered event
+        AM->>AM: Validate manifest, check requires
+        opt database: true
+            AM->>DB: provision_database
+            DB->>AM: ProvisioningResult
+        end
+        opt redis_streams declared
+            AM->>SM: setup_streams
+            SM->>AM: StreamSetupResult
+        end
+        AM->>Reg: Register app (status DISCOVERED)
     end
-    
-    AM->>Reg: Persist registry to disk
 ```
+
+Discovery does not allocate ports, install dependencies or run `setup_commands`: those happen in `prepare_app` (`POST /api/apps/{id}/prepare`). The registry is rebuilt on every platform start. See [workflows.md](workflows.md) section 2 for the decision logic.
 
 ### Service App Lifecycle
 ```mermaid
@@ -421,7 +427,6 @@ sequenceDiagram
     participant Sub as SubprocessLauncher
     participant systemd as systemd --user
     participant App as Service App
-    participant Redis as Redis
 
     UI->>API: POST /api/apps/{id}/process/start
     API->>Router: pick_launcher(app_entry)
@@ -436,7 +441,6 @@ sequenceDiagram
         API->>Sub: start_service(app_id)
         Sub->>App: Popen(main_file)
     end
-    App->>Redis: Publish app_started event
     API-->>UI: Return app status
 
     Note over App: App runs continuously
@@ -453,7 +457,6 @@ sequenceDiagram
         API->>Sub: stop_service(app_id)
         Sub->>App: SIGTERM / force kill
     end
-    App->>Redis: Publish app_stopped event
     API-->>UI: Return app status
 ```
 
@@ -464,19 +467,16 @@ sequenceDiagram
     participant UM as UI Manager
     participant Process as Streamlit Process
     participant TTL as TTL Manager
-    participant Redis as Redis
     
     UI->>UM: Launch Streamlit app
     UM->>Process: Spawn streamlit run
-    Process->>Redis: Publish app_started event
-    UM->>TTL: Start TTL timer (300s)
+    UM->>TTL: Start TTL timer
     UM->>UI: Return app URL/modal
     
     Note over Process: User interacts with app
     
     TTL->>TTL: Timer expires
     TTL->>Process: Terminate process
-    Process->>Redis: Publish app_stopped event
     TTL->>UM: Cleanup resources
 ```
 
@@ -486,10 +486,10 @@ sequenceDiagram
     participant Browser as User Browser
     participant C as Caddy
     participant AV as /auth/verify<br/>(Latarnia :8000)
-    participant App as Service App<br/>:810x
+    participant App as Service App<br/>(assigned port)
 
     Browser->>C: GET /apps/crm/dashboard [Cookie: latarnia_session=abc]
-    C->>AV: GET /auth/verify [X-Forwarded-Uri: /apps/crm/dashboard, Cookie: ...]
+    C->>AV: GET /auth/verify [X-Latarnia-App: crm (set by Caddy), Cookie: ...]
     AV-->>C: 200 [X-Latarnia-User: uid, X-Latarnia-App-Role: webUI-med, X-Latarnia-Is-Super: false]
     C->>App: GET /dashboard [X-Latarnia-User: uid, X-Latarnia-App-Role: webUI-med]
     App-->>Browser: 200 OK HTML
@@ -497,7 +497,7 @@ sequenceDiagram
     Note over Browser,App: App's own /docs is an ordinary protected route (no public bypass)
 
     Browser->>C: GET /apps/crm/docs [Cookie: latarnia_session=abc]
-    C->>AV: GET /auth/verify [X-Forwarded-Uri: /apps/crm/docs]
+    C->>AV: GET /auth/verify [X-Latarnia-App: crm]
     AV-->>C: 200 [role headers]
     C->>App: GET /docs
     App-->>Browser: 200 OK
@@ -505,9 +505,16 @@ sequenceDiagram
     Note over Browser,App: Auth failure
 
     Browser->>C: GET /apps/crm/dashboard [no valid session]
-    C->>AV: GET /auth/verify [X-Forwarded-Uri: /apps/crm/dashboard]
+    C->>AV: GET /auth/verify [X-Latarnia-App: crm]
     AV-->>C: 401 Unauthorized
-    C-->>Browser: 401 (redirects to /auth/login)
+    C-->>Browser: 302 redirect to /auth/login?next=/apps/crm/dashboard
+
+    Note over Browser,App: Authenticated, role none on the App
+
+    Browser->>C: GET /apps/crm/dashboard [valid session, no role on crm]
+    C->>AV: GET /auth/verify [X-Latarnia-App: crm]
+    AV-->>C: 403 No access to this app
+    C-->>Browser: 403 (passed through; only 401 redirects to login)
 ```
 
 ## Security Model
@@ -525,19 +532,18 @@ sequenceDiagram
 
 ### Network Security
 - Port allocation managed centrally
-- Apps communicate via Redis message bus
+- Apps communicate via Redis Streams
 - No direct inter-app network connections
 - Caddy is the sole external ingress; app ports and Latarnia :8000 are blocked from external access by ufw
 - All external traffic to app web UIs passes through Caddy's `forward_auth` gate
 - All `/api/*` requests are gated by `JWTAuthMiddleware`: accepts Bearer JWT (validated + revocation-checked) or a valid session cookie; 401 otherwise
-- Machine clients (scripts, AI agents) authenticate with long-lived HS256 JWTs issued via `POST /api/auth/tokens` (superuser session required). JWT revocation is a DB lookup on every request
+- Machine clients (scripts, AI agents) authenticate with long-lived HS256 JWTs issued via `POST /api/auth/tokens` (any logged-in user; a non-superuser's per-App roles are capped at their own role on that App, and only a superuser may grant `full`, else 403). JWT revocation is a DB lookup on every request
 - MCP Gateway requires a Bearer JWT to open the SSE session; per-connection `ContextVar` carries the token's app scope to isolate concurrent agent connections
 
 ### Resource Management
-- Memory and CPU limits via systemd
-- TTL-based cleanup for temporary processes
-- Disk usage monitoring and alerts
-- Process count limitations
+- No systemd resource limits (memory, CPU) are set on the generated App units
+- TTL-based cleanup for temporary Streamlit processes
+- Hardware metrics via the System Monitor (display only, no alerting)
 
 ## Deployment Architecture
 
@@ -546,9 +552,9 @@ sequenceDiagram
 localhost (Caddy self-signed TLS, port from {ENV}_DOMAIN config)
 └── forward_auth → localhost:8000 (/auth/verify — added Scope 2)
 localhost:8000 (Main Dashboard + API + MCP Gateway at /mcp)
-├── localhost:8100-8199 (Service App REST servers — internal only)
-├── localhost:9001-9099 (Service App MCP servers, declared in manifest)
-├── localhost:8501+     (Streamlit Apps)
+├── localhost:<allocated> (Service App REST servers — internal only, process_manager.port_range)
+├── localhost:<allocated> (Service App MCP servers — internal only, process_manager.mcp_port_range)
+├── localhost:<allocated> (Streamlit Apps — process_manager.port_range)
 └── localhost:6379      (Redis)
 ```
 
@@ -557,9 +563,9 @@ localhost:8000 (Main Dashboard + API + MCP Gateway at /mcp)
 Caddy :443 PRD + TST by domain (Let's Encrypt TLS, ufw allows 80/443/22)
 └── forward_auth → localhost:8000 (/auth/verify — added Scope 2)
 localhost:8000 (Main Dashboard + API + MCP Gateway at /mcp — internal only)
-├── Internal:8100-8199 (Service App REST servers — internal only)
-├── Internal:9001-9099 (Service App MCP servers, declared in manifest)
-├── Internal:8501+     (Streamlit Apps)
+├── Internal:<allocated> (Service App REST servers — internal only, process_manager.port_range)
+├── Internal:<allocated> (Service App MCP servers — internal only, process_manager.mcp_port_range)
+├── Internal:<allocated> (Streamlit Apps — process_manager.port_range)
 └── Internal:6379      (Redis)
 
 systemd system unit:
@@ -579,15 +585,12 @@ Prerequisite: sudo loginctl enable-linger {user}
 
 ### File System Layout
 ```
-/opt/latarnia/
-├── config/config.json
-├── src/latarnia/ (Application code)
-├── apps/ (Discovered applications)
-├── data/ (Per-app data directories)
-├── logs/ (Per-app log directories)
-├── registry/ (App registry persistence)
-├── prd/caddy/latarnia.caddyfile  (generated by CaddyConfigManager — PRD)
-└── tst/caddy/latarnia.caddyfile  (generated by CaddyConfigManager — TST)
+/opt/latarnia/{env}/               (env-scoped; full layout in dataModel.md "File System Structure")
+├── src/                           (Platform code)
+├── apps/                          (Discovered applications)
+├── data/                          (Per-app data directories)
+├── logs/                          (Per-app log files)
+└── caddy/latarnia.caddyfile       (generated by CaddyConfigManager)
 
 /etc/caddy/Caddyfile  (manually configured; imports the per-env includes above)
 ```
@@ -597,8 +600,7 @@ Prerequisite: sudo loginctl enable-linger {user}
 ### Resource Optimization
 - Manual refresh pattern (no auto-updates)
 - TTL-based Streamlit cleanup
-- Efficient Redis pub/sub usage
-- systemd resource limits
+- Redis Streams with a capped recent-events list
 
 ### Scalability Targets
 - Support 10-20 concurrent apps
@@ -609,5 +611,5 @@ Prerequisite: sudo loginctl enable-linger {user}
 ### Monitoring Strategy
 - Hardware metrics collection
 - Process resource monitoring
-- Redis performance tracking
+- Redis connectivity and metrics on the dashboard
 - App health check polling

@@ -38,6 +38,8 @@ _templates = Jinja2Templates(directory=str(PROJECT_ROOT / "templates"))
 H_USER = "X-Latarnia-User"
 H_ROLE = "X-Latarnia-App-Role"
 H_SUPER = "X-Latarnia-Is-Super"
+# Header Caddy's per-App forward_auth block sends to /auth/verify (T-0023).
+H_APP = "X-Latarnia-App"
 
 DASHBOARD_PATH = "/dashboard"
 
@@ -108,17 +110,6 @@ def _qr_data_uri(otpauth_uri: str) -> str:
     img.save(buf)
     b64 = base64.b64encode(buf.getvalue()).decode()
     return f"data:image/png;base64,{b64}"
-
-
-def _extract_app_name(forwarded_uri: str) -> Optional[str]:
-    """Pull the app name out of `/apps/{name}/...`; None for other paths."""
-    if not forwarded_uri:
-        return None
-    path = forwarded_uri.split("?", 1)[0]
-    parts = [p for p in path.split("/") if p]
-    if len(parts) >= 2 and parts[0] == "apps":
-        return parts[1]
-    return None
 
 
 def build_auth_router(auth_db, user_store, session_store, totp_provider,
@@ -306,11 +297,25 @@ def build_auth_router(auth_db, user_store, session_store, totp_provider,
         if not user or not user["is_active"]:
             return Response(status_code=401)
 
-        app_name = _extract_app_name(request.headers.get("X-Forwarded-Uri", ""))
+        # T-0023: Caddy names the App. The `forward_auth` block generated for
+        # `/apps/{name}/*` sets `X-Latarnia-App: {name}` on the request to
+        # /auth/verify (replacing any client value there); the catch-all block
+        # deletes it on the request to /auth/verify. The request URI is not read.
+        app_name = request.headers.get(H_APP) or None
+        role = _role_for(user, app_name)
+        if app_name is not None and role == "none":
+            # The platform, not the App, denies a caller with no role on this
+            # App. Caddy passes a forward_auth 403 back to the browser.
+            # %r: on a direct call to /auth/verify the header is client-set.
+            logger.debug("verify: no access to app %r for user %s", app_name, user["id"])
+            return Response(status_code=403, content="No access to this app")
+        # A 200 must always carry all three identity headers non-empty: Caddy
+        # 2.7.0–2.11.1 copy_headers keeps a client-sent header when verify's
+        # value is missing/empty, and the App proxy's header_up passes it on.
         headers = {
             H_USER: str(user["id"]),
             H_SUPER: "true" if user["is_superuser"] else "false",
-            H_ROLE: _role_for(user, app_name),
+            H_ROLE: role,
         }
         return Response(status_code=200, headers=headers)
 
@@ -491,6 +496,17 @@ def build_auth_router(auth_db, user_store, session_store, totp_provider,
                     status_code=403,
                     detail="Only a superuser can issue a token with the 'full' role",
                 )
+            # A token never carries more than its owner holds: on each App the
+            # role must rank at or below the caller's own role there (T-0025).
+            # Every entry is validated before any token is issued.
+            if not actor["is_superuser"]:
+                own_role = _role_for(actor, app_name)
+                if ROLE_VALUES.index(role) > ROLE_VALUES.index(own_role):
+                    raise HTTPException(
+                        status_code=403,
+                        detail=(f"Cannot grant '{role}' on '{app_name}': "
+                                f"your role there is '{own_role}'"),
+                    )
         expires_at = None
         raw_exp = body.get("expires_at")
         if raw_exp:

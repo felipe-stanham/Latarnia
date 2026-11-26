@@ -4,78 +4,18 @@ This document describes the data storage and persistence strategy for the Latarn
 
 ## Storage Strategy
 
-Latarnia uses a hybrid storage approach optimized for Raspberry Pi deployment:
-
-- **Configuration**: JSON files for human-readable settings
-- **App Registry**: JSON persistence with in-memory operations
-- **Message Bus**: Redis for real-time communication
-- **Logs**: File-based logging with rotation
-- **App Data**: File-based storage per application
+- **Configuration**: JSON file (`config/config.json`) plus `LATARNIA_*` environment overrides, validated by pydantic models
+- **Platform auth state**: Postgres database `latarnia_platform_{env}` (users, sessions, roles, machine tokens)
+- **App data**: one Postgres database per App that declares `database: true`, plus file-based storage per App (`data/{app_id}/`)
+- **App Registry**: in memory only; rebuilt from the `apps/` folders by `discover_apps()` on every start
+- **Redis Streams**: between Apps, plus one capped list for the dashboard activity feed
+- **Logs**: journald for Service Apps on Linux, plain files elsewhere (see Logs below)
 
 ## Data Models
 
 ### Configuration Schema
 
-```mermaid
-erDiagram
-    CONFIG {
-        object redis
-        object logging
-        object process_manager
-        int health_check_interval_seconds
-        object system
-    }
-    
-    REDIS {
-        string host
-        int port
-        int db
-    }
-    
-    LOGGING {
-        string level
-        string format
-    }
-    
-    PROCESS_MANAGER {
-        string data_dir
-        string logs_dir
-        int streamlit_port
-        int streamlit_ttl_seconds
-        object port_range
-    }
-    
-    PORT_RANGE {
-        int start
-        int end
-    }
-    
-    SYSTEM {
-        int main_port
-        string host
-    }
-    
-    CONFIG ||--|| REDIS : contains
-    CONFIG ||--|| LOGGING : contains
-    CONFIG ||--|| PROCESS_MANAGER : contains
-    CONFIG ||--|| SYSTEM : contains
-    CONFIG ||--|| MCP_CONFIG : contains
-    PROCESS_MANAGER ||--|| PORT_RANGE : contains
-```
-
-### MCP Configuration Schema
-
-```mermaid
-erDiagram
-    MCP_CONFIG {
-        bool enabled
-        string transport
-        string gateway_path
-        int tool_sync_interval_seconds
-    }
-```
-
-`enabled` defaults to `false`. When `true`, the gateway is initialized and mounted at `gateway_path` (default `/mcp`) using SSE transport.
+The platform settings are the pydantic models in `src/latarnia/core/config.py` (`LatarniaConfig` and the models it contains: Redis, Postgres, process manager and port ranges, system, MCP gateway, auth, event subscriber, logging). That file is the source of truth for fields, defaults and units; `config/config.example.json` shows the JSON layout. Not copied here.
 
 ### App Registry Schema
 
@@ -105,18 +45,7 @@ erDiagram
     }
 
     APP_CONFIG {
-        bool has_UI
-        bool has_web_ui
-        bool redis_required
-        bool database
-        bool mcp_server
-        int mcp_port
-        bool logs_dir
-        bool data_dir
-        bool auto_start
-        string restart_policy
-        list redis_streams_publish
-        list redis_streams_subscribe
+        object fields "AppConfig in src/latarnia/managers/app_manager.py is the source of truth (capability flags, restart_policy, redis_streams_*, requires_secrets, public_routes); mcp_port is rejected at parse time"
     }
 
     MANIFEST_DEPENDENCY {
@@ -140,7 +69,7 @@ erDiagram
         bool provisioned
         string database_name
         string role_name
-        string connection_url
+        string connection_url "in-memory only; never serialized (excluded from to_dict and API responses)"
         list applied_migrations
         datetime last_migration_at
     }
@@ -177,77 +106,39 @@ erDiagram
 
 ### System Metrics Schema
 
+System metrics are computed on request and never stored. `GET /api/system/metrics` returns `SystemMonitor.get_system_summary()` (`src/latarnia/utils/system_monitor.py`); the field lists of each part are defined there, not copied here. Redis status is a separate endpoint, `GET /api/system/redis`, served by the Redis monitor (not part of the summary); Postgres connectivity is `GET /api/system/postgres`.
+
 ```mermaid
 erDiagram
-    SYSTEM_METRICS {
-        datetime timestamp
+    SYSTEM_SUMMARY {
         object hardware
         object processes
-        object redis_status
+        string status
+        int timestamp
     }
-    
+
     HARDWARE {
         object cpu
         object memory
         object disk
         object temperature
+        int timestamp
     }
-    
-    CPU_METRICS {
-        float usage_percent
-        int count
-        array per_cpu_percent
+
+    PROCESSES {
+        int latarnia_count
+        array latarnia_processes
     }
-    
-    MEMORY_METRICS {
-        int total_mb
-        int available_mb
-        int used_mb
-        float percent
-    }
-    
-    DISK_METRICS {
-        int total_gb
-        int free_gb
-        int used_gb
-        float percent
-    }
-    
-    TEMPERATURE_METRICS {
-        float cpu_temp
-        string source
-    }
-    
-    PROCESS_INFO {
-        string name
-        int pid
-        float cpu_percent
-        int memory_mb
-        string status
-    }
-    
-    REDIS_STATUS {
-        string status
-        string host
-        int port
-        boolean connected
-        string error
-    }
-    
-    SYSTEM_METRICS ||--|| HARDWARE : contains
-    HARDWARE ||--|| CPU_METRICS : contains
-    HARDWARE ||--|| MEMORY_METRICS : contains
-    HARDWARE ||--|| DISK_METRICS : contains
-    HARDWARE ||--|| TEMPERATURE_METRICS : contains
-    SYSTEM_METRICS ||--o{ PROCESS_INFO : contains
-    SYSTEM_METRICS ||--|| REDIS_STATUS : contains
+
+    SYSTEM_SUMMARY ||--|| HARDWARE : contains
+    SYSTEM_SUMMARY ||--|| PROCESSES : contains
 ```
 
 ### Platform Auth Database Schema
 
 The platform owns a separate Postgres database — `latarnia_platform_{env}` (e.g., `latarnia_platform_dev`, `latarnia_platform_tst`, `latarnia_platform_prd`) — created and migrated by `AuthDB` (`src/latarnia/auth/db.py`) at Latarnia startup. This DB is **distinct from the per-app databases** provisioned by the DB Provisioner; it uses the platform's admin credentials and is never passed to App processes.
 
-Five tables live in this database. Migrations are in `src/latarnia/auth/migrations/001–007` and applied via the same sequential runner + `schema_versions` pattern used by the DB Provisioner.
+Five tables live in this database. Migrations are in the `src/latarnia/auth/migrations/` directory and applied via the same sequential runner + `schema_versions` pattern used by the DB Provisioner.
 
 ```mermaid
 erDiagram
@@ -257,7 +148,7 @@ erDiagram
         boolean is_superuser
         boolean is_active
         string setup_token "nullable; single-use TOTP enrollment token"
-        timestamp setup_token_expires_at "nullable; expires 24h after creation"
+        timestamp setup_token_expires_at "nullable; lifetime is auth.setup_token_ttl_hours"
         timestamp created_at "orders collision renames in migration 007 (oldest row keeps the plain lowercase name)"
         timestamp last_login_at
     }
@@ -311,17 +202,17 @@ erDiagram
 
 **Key field notes:**
 - `users.username`: normalization happens at a single boundary — `normalize_username()` in `src/latarnia/auth/users.py`, called from both `UserStore.create_user` and `UserStore.get_user_by_username`. Every read and every write is folded to lowercase there, so `routes.py` and `USERNAME_RE` are unchanged; mixed-case input is normalized rather than rejected.
-- `user_credentials.credential_data`: for TOTP, contains `{"totp_secret_enc": "<base64-nonce+ciphertext>"}`. The TOTP secret is encrypted with AES-256-GCM using `LATARNIA_TOTP_ENC_KEY` from `secrets.env`. Nonce is prepended to ciphertext.
+- `user_credentials.credential_data`: for TOTP, contains `{"totp_secret_enc": "<base64-nonce+ciphertext>", "last_totp_window": <int>}` (`last_totp_window` is the last accepted TOTP time window, for replay protection). The TOTP secret is encrypted with AES-256-GCM using `LATARNIA_TOTP_ENC_KEY` from `secrets.env`. Nonce is prepended to ciphertext.
 - `sessions.token_hash`: cookie value is a random UUIDv4 never persisted; only its SHA-256 hash is stored.
 - `app_roles.role` enum: `none`, `webUI-low`, `webUI-med`, `webUI-full`, `full`. Default effective role when no row exists: `none`. `full` is the only role granting REST API access.
-- `machine_tokens`: JWT claims carry `sub` (user_id), `iat`, `exp`, `apps` (copy of `app_scope`), `super` (bool). Revocation check is a DB lookup on every API call. `revoked_at` is set on individual revocation, on user deactivation (`deactivate_user`), and on re-issue (`reissue_setup_token`); reactivation does NOT clear it.
+- `machine_tokens`: JWT claims carry `sub` (user_id), `iat`, `jti` (random, unique per token so `token_hash` never collides — T-0022), `exp`, `apps` (copy of `app_scope`), `super` (bool). Revocation check is a DB lookup on every API call. `revoked_at` is set on individual revocation, on user deactivation (`deactivate_user`), and on re-issue (`reissue_setup_token`); reactivation does NOT clear it.
 - `app_roles.granted_by` and `machine_tokens.granted_by`: `ON DELETE SET NULL` (migration 006) — rows survive the deletion of the granting Superuser with `granted_by = NULL`.
 
 ### Postgres Per-App Database Schema
 
-Each app with `database: true` receives its own Postgres database (`{database_prefix}{app_name}`, e.g. `tst_latarnia_crm`) and role (`{role_prefix}{app_name}_role`). The platform creates the following tracking table in every provisioned database.
+Each app with `database: true` receives its own Postgres database and role. Names are built by `DbProvisioner._generate_names` in `src/latarnia/managers/db_provisioner.py` from `postgres.database_prefix` / `postgres.role_prefix` and the App name (`-` mapped to `_`, lowercased). The platform creates the following tracking table in every provisioned database.
 
-**Platform-default extensions:** Every Latarnia-provisioned app DB has `vector` (pgvector) enabled by the platform at provisioning time. Apps using `vector(N)` columns or HNSW indexes do NOT need a `CREATE EXTENSION` migration — the per-app role doesn't have privilege anyway. The list lives in `db_provisioner.py::DEFAULT_EXTENSIONS`.
+**Platform-default extensions:** Every Latarnia-provisioned app DB has the extensions in `db_provisioner.DEFAULT_EXTENSIONS` enabled by the platform at provisioning time. Apps do NOT need a `CREATE EXTENSION` migration for those — the per-app role doesn't have privilege anyway. Check the source for the current list.
 
 ```mermaid
 erDiagram
@@ -396,7 +287,7 @@ Paths are env-scoped (P-0004): the same Pi runs `tst` and `prd` side-by-side und
 
 ### Per-user systemd state (Linux only)
 ```
-~felipe/.config/systemd/user/
+~{user}/.config/systemd/user/             # home of the user running the platform
 ├── latarnia-tst-{app_id}.service      # Generated at runtime by ServiceManager
 └── latarnia-prd-{app_id}.service
 ```
@@ -413,31 +304,22 @@ Paths are env-scoped (P-0004): the same Pi runs `tst` and `prd` side-by-side und
 - **Service apps on Linux**: stdout/stderr → systemd journal (queryable with `journalctl _SYSTEMD_USER_UNIT=latarnia-{env}-{app_id}.service`). No per-app log files on disk.
 - **Service apps on macOS dev**: stdout/stderr → `logs/{app_id}.log` (SubprocessLauncher Popen redirect).
 - **Streamlit apps (any OS)**: stdout/stderr → `logs/{app_id}-streamlit.log` (StreamlitManager Popen redirect).
-- **Platform main process**: still writes `latarnia-main.log` under `logs/` (legacy; not env-scoped per app since the main unit is the only writer).
+- **Platform main process**: stdout/stderr plus a plain `FileHandler` on `latarnia-main.log` under `logs/` (set up in `main.py`; no rotation).
 
 ### Registry
 
-There is **no on-disk registry**. `AppRegistry` is rebuilt on every platform start by `discover_apps()` scanning `apps/`, plus reconciliation against any surviving `latarnia-{env}-*.service` user units (P-0005 Scope 4). Port allocations are also in-memory only.
+There is **no on-disk registry** (no `registry/` directory, no JSON persistence). `AppRegistry` is rebuilt on every platform start by `discover_apps()` scanning `apps/`, plus reconciliation against any surviving `latarnia-{env}-*.service` user units (P-0005 Scope 4). Port allocations are also in-memory only.
 
 ## Redis Data Structures
 
-### Message Bus Channels
+### Redis Keys in use
+
 ```
-latarnia:events              # General system events
-latarnia:apps:*              # App-specific events
-latarnia:health              # Health check events
-latarnia:metrics             # System metrics
-latarnia:logs                # Log events
+latarnia:streams:{declared_name}   # App-to-App streams (see below)
+latarnia:events:recent             # Capped list: latest stream messages for the dashboard activity feed
 ```
 
-### Redis Keys
-```
-latarnia:config              # Cached configuration
-latarnia:apps:registry       # App registry cache
-latarnia:system:metrics      # Latest system metrics
-latarnia:ports:allocated     # Port allocation tracking
-latarnia:health:*            # Health check results
-```
+No other keys are written by the platform. The platform neither publishes nor subscribes to pub/sub channels (leftover pub/sub code — `RedisMessageBusClient`, `event_subscriber.channels`, and `example_full_app` publishing to `latarnia:events:app` — is unused and tracked by T-0029), no cached registry or config, no metrics in Redis, and no lifecycle events (App started/stopped) are published. The App Registry and port allocations are in memory.
 
 ### Redis Streams
 
@@ -451,22 +333,17 @@ latarnia:streams:{declared_name}   # Stream key (e.g. latarnia:streams:crm.conta
 - **Subscribers**: one consumer group per subscribing app, named `{app_id}` within the stream. Tracked in `StreamManager._subscriber_groups`.
 - **App usage**: apps `XADD` to their publish streams and `XREADGROUP` / `XACK` from their subscribe consumer groups using a Redis connection they manage themselves.
 
-### Event Message Format
+### Activity Feed Record
+
+`AsyncStreamConsumer` (`src/latarnia/core/event_subscriber.py`) reads every `latarnia:streams:*` stream as consumer group `latarnia-dashboard` and pushes one JSON record per message onto `latarnia:events:recent`, trimmed to `event_subscriber.max_events`:
+
 ```json
 {
-  "timestamp": "2024-01-01T12:00:00Z",
-  "event_type": "app_started|app_stopped|health_check|error",
-  "source": "app_id|system|service_manager",
-  "data": {
-    "app_id": "camera-detection",
-    "status": "running",
-    "port": 8101,
-    "pid": 12345
-  },
-  "metadata": {
-    "version": "1.0.0",
-    "correlation_id": "uuid"
-  }
+  "source": "publishing app or stream name",
+  "timestamp": 1700000000,
+  "stream": "latarnia:streams:crm.contacts.created",
+  "stream_id": "1700000000000-0",
+  "data": {}
 }
 ```
 
@@ -474,60 +351,35 @@ latarnia:streams:{declared_name}   # Stream key (e.g. latarnia:streams:crm.conta
 
 ### Configuration Management
 - **Primary**: JSON file (`config/config.json`)
-- **Backup**: Automatic backup on changes
 - **Environment**: Override via `LATARNIA_*` variables
 - **Validation**: Pydantic models with type checking
 
 ### App Registry Management
-- **Primary**: In-memory dictionary for fast access
-- **Persistence**: JSON file with atomic writes
-- **Backup**: Daily snapshots in history directory
-- **Recovery**: Automatic reload from disk on startup
+- **Storage**: in-memory dictionary (`AppRegistry`), never written to disk
+- **Recovery**: rebuilt by `discover_apps()` on startup, then reconciled against surviving systemd units
 
 ### System Metrics
-- **Collection**: Real-time via psutil
-- **Storage**: Redis with TTL (1 hour)
-- **Aggregation**: No historical storage (manual refresh pattern)
-- **Export**: On-demand JSON API
+- **Collection**: on demand via psutil (`SystemMonitor`)
+- **Storage**: none; nothing is kept in Redis or on disk (manual refresh pattern)
+- **Export**: on-demand JSON API
 
 ### Log Management
-- **Format**: Structured logging with timestamps
-- **Rotation**: Size-based rotation (10MB per file)
-- **Retention**: 30 days for app logs, 7 days for system logs
-- **Access**: File-based reading with pagination
+- **Platform log**: plain `FileHandler` (`latarnia-main.log`) plus stdout, no rotation
+- **Service Apps on Linux**: journald; elsewhere a redirect file per App (see Logs above)
+- **Access**: `GET /api/apps/{id}/logs` reads the relevant source
 
 ## Data Migration Strategy
 
-### Version 1.0 Schema
-- Initial implementation with JSON persistence
-- No database migrations required
-- Configuration schema versioning
-
-### Future Considerations
-- SQLite integration for complex queries
-- Time-series database for metrics history
-- Backup and restore procedures
-- Data export/import capabilities
+- Platform auth DB: sequential SQL migrations in `src/latarnia/auth/migrations/`, applied at startup.
+- Per-App databases: the App's own `migrations/*.sql`, applied by the DB Provisioner.
+- Configuration is not versioned; unknown keys are the pydantic model's concern.
 
 ## Performance Considerations
 
-### Memory Usage
-- In-memory app registry (< 1MB for 100 apps)
-- Redis memory limits (64MB default)
-- Log file size limits (10MB per file)
-- Metrics data TTL (1 hour)
-
-### Disk Usage
-- Configuration files (< 1KB)
-- App registry (< 100KB for 100 apps)
-- Log files (rotated, max 100MB per app)
-- App data (unlimited, per-app responsibility)
-
-### Access Patterns
-- Configuration: Read on startup, write on changes
-- App registry: Read frequently, write on discovery/changes
-- Metrics: Read on dashboard access, write every 60 seconds
-- Logs: Write continuously, read on demand
+- The App Registry is a small in-memory dictionary.
+- The activity feed list is capped by `event_subscriber.max_events`.
+- Metrics are computed per request and not stored.
+- App data is unlimited and per-App responsibility.
 
 ## Backup and Recovery
 
@@ -548,8 +400,8 @@ A platform-managed centralized backup loop (per-app data + per-app DBs, driven b
 # Per-env app data (rsync target)
 rsync -a /opt/latarnia/{env}/data/ /backup/{env}-data-$(date +%Y%m%d)/
 
-# Per-app Postgres dump (iterate the registry — one DB per app with database:true)
-pg_dump -h localhost -U superuser {env}_latarnia_{app_id} > /backup/{env}-{app_id}-$(date +%Y%m%d).sql
+# Per-app Postgres dump (one DB per app with database:true; name from db_provisioner._generate_names)
+pg_dump -h localhost -U superuser {app_database} > /backup/{env}-{app_id}-$(date +%Y%m%d).sql
 
 # Redis (host-level, both envs share the same instance)
 redis-cli BGSAVE

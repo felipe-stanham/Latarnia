@@ -46,6 +46,8 @@ Critical-path tests for Latarnia. Each test is declarative — Claude Code gener
 
 - **test_manifest_version_validation:** Attempt to create `AppManifest` with `version="1.0"` (invalid semver). -> Raises validation error (pydantic `ValidationError`).
 
+- **test_app_name_pattern:** (T-0024) Manifest `name` `a{http.request.uri}`, `Camera Detection`, `App_A`, `a/b` or `app\n` -> `AppManifest` raises `ValidationError` on `name` and `discover_apps()` does not register the App (ERROR `Invalid manifest in <path>`); `latarnik`, `example_full_app`, `crm-app` -> valid.
+
 ## Service Management
 
 - **test_service_template_generation:** Create `ServiceManager` with mocked dependencies. Mock `registry.get_app` to return a service app entry at path `/tmp/test-service` with `assigned_port=8100`, `main_file="app.py"`, `restart_policy="always"`, `redis_required=True`, `data_dir=True`. Call `generate_service_template("test-service")`. -> Returns a string containing `"Description=Latarnia Service - test-service"`, `"ExecStart={sys.executable} app.py --port 8100"` (absolute venv Python — no bare `python`), `"Restart=always"`, `"Environment=ENV={env}"`, `"Environment=REDIS_HOST=localhost"`. Must NOT contain `"PartOf="` (P-0005 Scope 4: lifecycle decoupling) and must NOT contain `"--logs-dir"` (P-0005 Scope 4: journald is the canonical sink).
@@ -158,24 +160,6 @@ Critical-path tests for Latarnia. Each test is declarative — Claude Code gener
 
 - **test_mcp_backward_compat_fail:** Call `MCPGateway.check_backward_compatibility(["search", "add", "delete"], ["search", "add"])`. -> Returns `(False, ["delete"])`.
 
-## Web UI Reverse Proxy
-
-- **test_proxy_app_not_found:** Set `web_proxy.app_manager` to a mock with `registry.get_app_by_name("nonexistent")` returning `None`. Call `_lookup_app("nonexistent")`. -> Returns `(None, HTMLResponse)` with status 404 and body containing "App Not Found".
-
-- **test_proxy_app_no_web_ui:** Mock `registry.get_app_by_name("crm")` to return an app with `manifest.config.has_web_ui=False`. Call `_lookup_app("crm")`. -> Returns `(None, HTMLResponse)` with status 404 and body containing "No Web UI".
-
-- **test_proxy_app_not_running:** Mock `registry.get_app_by_name("crm")` to return an app with `has_web_ui=True` but `status="stopped"`. Call `_lookup_app("crm")`. -> Returns `(None, HTMLResponse)` with status 503 and body containing "Unavailable".
-
-- **test_proxy_app_lookup_success:** Mock `registry.get_app_by_name("crm")` to return an app with `has_web_ui=True`, `status="running"`, `runtime_info.assigned_port=8101`. Call `_lookup_app("crm")`. -> Returns `(app_entry, None)`.
-
-- **test_proxy_forwarded_headers:** Create a mock `Request` with `client.host="192.168.1.10"`, `url.scheme="https"`, `headers={"host": "latarnia:8000", "accept": "text/html"}`. Call `_build_forwarded_headers(request)`. -> Returns dict with `x-forwarded-for="192.168.1.10"`, `x-forwarded-proto="https"`, `x-forwarded-host="latarnia:8000"`. "host" header is removed. "accept" header is preserved.
-
-- **test_proxy_http_success:** Use `httpx.AsyncClient` with FastAPI `TestClient` (ASGI transport). Mock a running app `crm` with `has_web_ui=True` on port 8101. Mock `httpx.AsyncClient.request` to return a 200 response with body `"<h1>CRM</h1>"`. Send GET to `/apps/crm/dashboard`. -> Response status 200, body contains `"<h1>CRM</h1>"`.
-
-- **test_proxy_http_connect_error:** Mock a running app `crm`. Mock `httpx.AsyncClient.request` to raise `httpx.ConnectError`. Send GET to `/apps/crm/`. -> Response status 503 with body containing "Cannot connect".
-
-- **test_proxy_bare_app_redirect:** Mock a running app `crm` with `has_web_ui=True`. Send GET to `/apps/crm` (no trailing slash). -> Response status 307 with `Location: /apps/crm/`.
-
 ## MCP SSE Transport (Integration)
 
 - **test_mcp_sse_endpoint_connects:** Build the MCP Starlette app from `examples/mcp_server_example.py` via `_build_mcp_app()`. Start it with `uvicorn.Server` on a random available port in a background thread. Send GET to `http://127.0.0.1:{port}/sse` with a 3-second timeout. -> Response status 200. First line of body starts with `event: endpoint`. Stop the server.
@@ -196,35 +180,35 @@ Critical-path tests for Latarnia. Each test is declarative — Claude Code gener
 
 - **test_dashboard_web_ui_button:** Render a service app card with `manifest.config.has_web_ui=true` and `name="crm"`. -> Card HTML contains `<a` tag with `href="/apps/crm/"` and text `"Web UI"`.
 
-- **test_dashboard_error_unmet_deps:** Call `buildErrorAlerts` with app data containing `dependencies: [{app: "kb", satisfied: false}]`. -> Returns HTML containing `"Unmet deps: kb"`.
+- **test_dashboard_error_unmet_deps:** Call `buildStatusReasons` with app data containing `dependencies: [{app: "kb", satisfied: false}]`. -> Returns HTML containing `"Unmet deps: kb"`.
 
 ## Integration Tests — Full Stack (Playwright MCP)
 
-These tests require the Playwright MCP server and a running local dev instance of Latarnia with the example apps installed in `apps/`. The `example_full_app` and `example_companion` apps serve as the integration test fixtures for the platform — they exercise every platform feature (DB, MCP, Redis Streams, web UI proxy, dependencies).
+These tests require the Playwright MCP server and a running local dev instance of Latarnia with the example apps installed in `apps/`. The `example_full_app` and `example_companion` apps serve as the integration test fixtures for the platform — they exercise every platform feature (DB, MCP, Redis Streams, web UI via Caddy, dependencies).
 
 **Prerequisite:** Copy `examples/example_full_app` and `examples/example_companion` to `apps/` before running. Start Latarnia dev server on localhost:8000. Start the example_full_app via the API (`POST /api/apps/example-full-app/process/start`).
 
 ### Dashboard
 
-- **test_dashboard_page_loads:** Use Playwright to navigate to `http://localhost:8000/dashboard`. -> Page title contains "Latarnia". Page contains an element with text "System Health". No JavaScript console errors.
+- **test_dashboard_page_loads:** Use Playwright to navigate to `http://localhost:8000/dashboard`. -> Page title contains "Latarnia". Page contains a "System Status" card header. No JavaScript console errors.
 
 - **test_dashboard_shows_app_cards:** Navigate to `http://localhost:8000/dashboard`. -> Page contains app cards for both `example_full_app` and `example_companion`. Each card displays the app name and status.
 
-- **test_dashboard_health_badge:** Navigate to `http://localhost:8000/dashboard`. -> Health status badge is visible and shows either "good", "warning", or "error".
+- **test_dashboard_health_badge:** Navigate to `http://localhost:8000/dashboard`. -> The System Status card shows a Redis badge and a Postgres badge, each reading "Connected" when the service is reachable (there is no single overall health badge).
 
 - **test_dashboard_capability_badges_render:** Navigate to `http://localhost:8000/dashboard`. -> The `example_full_app` card shows capability badges for MCP (with tool count), DB (with migration count), and Streams (with pub/sub counts).
 
-- **test_app_web_ui_opens_in_modal:** Navigate to `http://localhost:8000/dashboard`. Click the "Web UI" button on the `example_full_app` card. -> A modal/iframe opens displaying the app's web UI with the "Example Full App" heading.
+- **test_app_web_ui_opens_in_modal:** Navigate to `http://localhost:8000/dashboard`. Click the "Web UI" button on the `example_full_app` card. -> A new browser tab opens at `/apps/example_full_app/` displaying the app's web UI with the "Example Full App" heading.
 
 ### App Web UI
 
-- **test_example_app_web_ui_loads:** Use Playwright to navigate to `http://localhost:8100/`. -> Page contains heading "Example Full App". Page contains "Add Item" form with name and description inputs. Items table is visible.
+- **test_example_app_web_ui_loads:** Use Playwright to navigate to the App's own URL `http://localhost:{assigned_port}/`. -> Page contains heading "Example Full App". Page contains "Add Item" form with name and description inputs. Items table is visible.
 
-- **test_example_app_add_item_via_ui:** Navigate to `http://localhost:8100/`. Fill in the "Item name" input with "playwright-test-item" and description with "added by test". Click the "Add" button. -> Items table updates to include a row with "playwright-test-item".
+- **test_example_app_add_item_via_ui:** Navigate to `http://localhost:{assigned_port}/` (the App's assigned port). Fill in the "Item name" input with "playwright-test-item" and description with "added by test". Click the "Add" button. -> Items table updates to include a row with "playwright-test-item".
 
 ### MCP via Platform Gateway
 
-- **test_mcp_dynamic_port_allocation:** After example_full_app is started, send GET to `http://localhost:8000/api/apps`. -> The `example_full_app` entry has `mcp_info.enabled == true` and `mcp_info.mcp_port` is an integer in range 9001-9099 (dynamically allocated, not hardcoded).
+- **test_mcp_dynamic_port_allocation:** After example_full_app is started, send GET to `http://localhost:8000/api/apps`. -> The `example_full_app` entry has `mcp_info.enabled == true` and `mcp_info.mcp_port` is an integer inside the configured `process_manager.mcp_port_range` (dynamically allocated, not hardcoded).
 
 - **test_mcp_gateway_lists_example_tools:** After example_full_app is started, send GET to `http://localhost:8000/api/apps`. -> The `example_full_app` entry has `mcp_info.healthy == true` and `mcp_info.registered_tools` contains `["list_items", "add_item", "get_status"]`.
 
@@ -232,11 +216,12 @@ These tests require the Playwright MCP server and a running local dev instance o
 
 ### Redis Streams
 
-- **test_item_creation_publishes_event:** Add an item via `POST http://localhost:8100/api/items?name=stream-test`. -> Response 200 with item data. Check Redis stream `latarnia:streams:example.events.created` (via `redis-cli XRANGE latarnia:streams:example.events.created - + COUNT 1`). -> Last entry contains `source == "example_full_app"` and data contains `"item_created"`.
+- **test_item_creation_publishes_event:** Add an item via `POST http://localhost:{assigned_port}/api/items?name=stream-test` (the App's assigned port). -> Response 200 with item data. Check Redis stream `latarnia:streams:example.events.created` (via `redis-cli XRANGE latarnia:streams:example.events.created - + COUNT 1`). -> Last entry contains `source == "example_full_app"` and data contains `"item_created"`.
 
 ### Database
 
 - **test_example_app_db_provisioned:** Query the API `GET http://localhost:8000/api/apps`. -> The `example_full_app` entry has `database_info.provisioned == true` and `database_info.applied_migrations` contains `["001_initial.sql", "002_add_tags.sql", "003_add_status.sql"]`.
+- **test_api_never_returns_db_password:** Read the `example_full_app` role password from `{env_root}/data/.db_credentials/latarnia_example_full_app_role.json`, then `GET /api/apps` and `GET /api/apps/example-full-app` (the App's `app_id`, from its folder name) as a Superuser. -> No response body contains the password; `database_info` has no `connection_url` key but still has `database_name`, `role_name` and `applied_migrations`. (T-0021)
 
 ## Authentication, Roles & Tokens (P-0008)
 
@@ -253,7 +238,7 @@ These tests require the Playwright MCP server and a running local dev instance o
 ### Login & Session
 
 - **test_totp_login:** `POST /auth/login` with username `admin` + a valid 6-digit code. -> 302/303 with `latarnia_session` cookie. Replaying the same code within its 30s window -> rejected.
-- **test_verify_headers:** `GET /auth/verify` with a valid session cookie and `X-Forwarded-Uri: /apps/example_full_app/`. -> 200 with `X-Latarnia-User`, `X-Latarnia-App-Role`, `X-Latarnia-Is-Super`. Without a cookie -> 401.
+- **test_verify_headers:** `GET /auth/verify` with a valid session cookie and `X-Latarnia-App: example_full_app` (the header Caddy's `/apps/example_full_app/*` `forward_auth` block sends). -> For a superuser, or a user with a role other than `none` on `example_full_app`: 200 with `X-Latarnia-User`, `X-Latarnia-App-Role`, `X-Latarnia-Is-Super`. For a user with role `none` on it: 403 `No access to this app` with no `X-Latarnia-*` headers (T-0023). No `X-Latarnia-App` (non-App paths such as the dashboard; the URI is not read) -> 200 for any valid session. Without a cookie -> 401.
 - **test_dev_totp_bypass_is_dev_only (T-0010):** Build the auth gate with `ENV=tst` and `LATARNIA_DEV_TOTP_BYPASS=1`. -> `dev_totp_bypass_enabled()` returns `False` and the secrets loader is never called; same for `ENV=prd`. With `ENV=dev` + the flag, `POST /auth/login` with username `admin` and code `000000` -> 303 with a `latarnia_session` cookie; without the flag the same request -> 401. An unknown or inactive username -> 401 even with the bypass active.
 - **test_login_is_case_insensitive (P-0011):** With the superuser enrolled as `admin`, `POST /auth/login` with username `ADMIN` + a valid 6-digit code. -> 303 to `/dashboard` with a `latarnia_session` cookie. `POST /api/auth/users` `{"username":"ADMIN"}` as a superuser -> 409 `username already exists`, and `SELECT username FROM users` never contains an uppercase character.
 
@@ -261,16 +246,22 @@ These tests require the Playwright MCP server and a running local dev instance o
 
 - **test_dashboard_tile_role_filtering:** As a non-superuser with role `none` for `example_full_app`, load `/dashboard` (GET `/api/apps`). -> The `example_full_app` tile is absent. Grant `webUI-low` -> tile appears on next load with a role badge.
 - **test_assign_full_requires_superuser:** `POST /api/auth/roles/example_full_app` `{"role":"full","user_id":...}` as a non-superuser -> 403; as a superuser -> 200.
+- **test_live_none_role_blocked_at_ingress:** (T-0023, live on tst after deploy) Non-superuser with role `none` on `example_full_app` -> `GET https://<tst>/apps/example_full_app/` with their session -> 403 (not the page, not a login redirect). Run by `tests/cache/regression_live.sh` when `INGRESS` is set.
+- **test_real_chain_per_app_authz:** (T-0023) `PYTHONPATH=src ENV=dev .venv/bin/python -m pytest tests/integration/test_caddy_forward_auth.py -rs` with `caddy` on PATH -> every test runs (0 skipped) and passes: through the real `caddy` binary, a user with role `none` on an App gets 403 and the App receives nothing, for every request-target form Caddy routes to that App; a granted role reaches the App's web UI; client-sent `X-Latarnia-*` headers (incl. `X-Latarnia-App`, any case, duplicated, or named in `Connection`) never change the App checked or the identity the App receives. A skip (`caddy binary not installed`) is NOT a pass.
+- **test_live_role_reaches_app_webui:** (T-0023, live on tst after deploy) Same user granted `webUI-low` -> `GET https://<tst>/apps/example_full_app/` -> 200 and the page has no "Add Item" form (role `webUI-low` reached the App through Caddy). Granted `webUI-full` -> "Add Item" present. With `webUI-low`, the same request over `curl --http1.1` with `Connection: close, X-Latarnia-App-Role, X-Latarnia-User, X-Latarnia-Is-Super` -> still 200, the page shows role `webUI-low` and no "Add Item" (a client `Connection` header cannot strip the identity headers). (The check against the App port with a hand-set header does not prove this.) Run by `tests/cache/regression_live.sh` when `INGRESS` is set.
 
 ### Machine Tokens
 
 - **test_token_issue_and_use:** `POST /api/auth/tokens` `{"label":"agent","app_scope":{"example_full_app":"webUI-med"}}` (session-authed) -> returns a raw JWT once. `GET /api/apps` with `Authorization: Bearer <jwt>` -> 200. No token -> 401.
 - **test_token_revocation:** `DELETE /api/auth/tokens/{id}` -> token marked revoked; a subsequent `GET /api/apps` with that token -> 401.
+- **test_token_scope_capped_by_owner_role:** (T-0025) Non-superuser with role `none` on an App -> `POST /api/auth/tokens` with `app_scope` `{<app>: webUI-full}` -> 403 naming the App and the caller's role, no token created; with role `webUI-med` -> `webUI-med`/`webUI-low` 200, `webUI-full` 403; mixed scope with one entry above the caller's role -> 403 and no token; superuser -> any scope 200.
 - **test_token_scope_enforced:** A non-superuser token scoped to app A -> `GET /api/apps/{B}` returns 403.
+- **test_superuser_token_gets_single_app:** (T-0022) `main.get_app` with claims `{"super": true, "apps": {}}` and no session -> returns the App (200), not 401. Covered by `tests/unit/test_machine_token_access.py`.
+- **test_identical_same_second_mints_unique:** (T-0022) Two `POST /api/auth/tokens` with identical body in the same second (`time.time` frozen) -> both 200, distinct tokens and `token_hash` values. Covered by `tests/integration/test_token_flow.py::test_identical_same_second_mints_both_succeed`.
 
 ### Role-Aware Example App
 
-- **test_example_webui_role_header:** `GET http://localhost:8100/` with header `X-Latarnia-App-Role: webUI-low` -> no "Add Item" form. With `full` -> "Add Item" form present and an "Admin" section. No header -> defaults to full (backward compatible).
+- **test_example_webui_role_header:** `GET http://localhost:{assigned_port}/` (the App's assigned port) with header `X-Latarnia-App-Role: webUI-low` -> no "Add Item" form. With `full` -> "Add Item" form present and an "Admin" section. No header -> defaults to full (backward compatible).
 - **test_mcp_requires_bearer:** Connect an MCP client to `/mcp/sse` without a Bearer token -> 401. With a valid in-scope token -> tool list scoped to the token's apps; the per-app MCP server receives `X-Latarnia-App-Role`.
 
 ### API Docs (T-0020)

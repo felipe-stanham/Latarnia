@@ -8,20 +8,15 @@ Latarnia is a self-hosted platform for exposing Apps. An App is a folder with a 
 - **App independence**: Each app is fully self-contained with its own dependencies, data directory, and logs
 - **Centralized shared resources**: Data (`data/`) and logs (`logs/`) directories are shared but organized per-app
 - **Modal UI strategy**: Both Streamlit apps and service app UIs render in modals on the dashboard
-- **JSON-based persistence**: Config, registry, and app data stored as JSON files (no database)
-- **Redis message bus**: All inter-app communication goes through Redis pub/sub
+- **Persistence**: Config in `config/config.json`; platform auth state in Postgres (`latarnia_platform_{env}`); per-App data in its own Postgres database and `data/{app_id}/`. The App Registry is in memory only, rebuilt by `discover_apps()` on every start
+- **Redis Streams bus**: App-to-App messaging goes through Redis Streams (`latarnia:streams:*`); no pub/sub
 - **systemd integration**: Service apps managed as systemd units for reliability
 
 ## Cross-Project Constraints
 - Target hardware: Raspberry Pi 5, 8GB RAM, ARM64, Raspberry Pi OS — runs `dev`/`tst`/`prd`. Keep code arch-agnostic (each App builds its own venv on the host).
-- Tech stack: Python 3.9+, FastAPI, Bootstrap 5, Redis, Postgres (with `pgvector` enabled cluster-wide as a platform-default extension)
-- Port ranges: Main app on 8000, service apps on 8100-8199, MCP servers on 9001-9099, Streamlit apps on 8501+
-- Environment port isolation (homeserver multi-env):
-
-| Resource | TST Range | PRD Range |
-|----------|-----------|-----------|
-| REST API ports | 8100–8149 | 8150–8199 |
-| MCP ports | 9001–9049 | 9050–9099 |
+- Tech stack: Python 3.10+, FastAPI, Bootstrap 5, Redis, Postgres (with `pgvector` enabled cluster-wide as a platform-default extension)
+- Port ranges: Main app on 8000 (`system.main_port`); Service Apps and MCP servers get ports from `process_manager.port_range` and `process_manager.mcp_port_range` (`src/latarnia/core/config.py`); Streamlit apps take their port from the same Service App range via `port_manager.allocate_port` (`process_manager.streamlit_port` is currently unused)
+- Environment port isolation (homeserver multi-env): each env's `config/config.json` sets its own non-overlapping ranges
 
 - Production deployment path: `/opt/latarnia/`
 - All apps must provide a `latarnia.json` manifest and `requirements.txt`
@@ -56,14 +51,14 @@ you need to see open work; never at session startup.
 
 | Tool        | Config location  | Purpose                                                |
 |-------------|------------------|--------------------------------------------------------|
-| pytest      | `tests/unit/`, `tests/integration/` | Run via `PYTHONPATH=src python3 -m pytest tests/ -q` (504 passed, 1 skipped as of T-0020). **`PYTHONPATH=src` is required** — the package is not installed in the venv and `pytest.ini` is inert (see T-0016); without it collection fails. |
+| pytest      | `tests/unit/`, `tests/integration/` | Run via `PYTHONPATH=src python3 -m pytest tests/ -q`. **`PYTHONPATH=src` is required** — the package is not installed in the venv and `pytest.ini` is inert (see T-0016); without it collection fails. |
 | Playwright MCP | `.mcp.json`  | Browser-level testing for dashboards and web UIs — available as `playwright` MCP server |
 
 MCP servers are configured in `.mcp.json` at the project root.
 
 ### Integration Test Fixtures
 
-`example_full_app` and `example_companion` (in `examples/`) are the integration test fixtures for the platform. They exercise every platform feature: Postgres DB with migrations, MCP server with tools, Redis Streams pub/sub, web UI proxy, and app dependencies. Any change to a platform feature must be accompanied by a corresponding update to `example_full_app` that exercises that feature.
+`example_full_app` and `example_companion` (in `examples/`) are the integration test fixtures for the platform. They exercise every platform feature: Postgres DB with migrations, MCP server with tools, Redis Streams, web UI proxy, and app dependencies. Any change to a platform feature must be accompanied by a corresponding update to `example_full_app` that exercises that feature.
 
 > **Source of truth:** `examples/` is committed to git. `apps/` is gitignored and populated from `examples/` during deployment. All changes to example apps must be made in `examples/`, never in `apps/`.
 
@@ -113,8 +108,8 @@ This section captures the V2 framing so it survives across sessions. Do **not** 
 
 ### What V2 would actually replace
 
-- **Supervision:** `health_monitor.py`'s restart logic (currently absent or ad-hoc) → `Restart=on-failure` in systemd units. Already delivered by P-0005.
-- **Logging:** per-app file logging in `logs/{app}/` → journald (queryable with `journalctl -u latarnia-{env}-{app}`). Largely delivered by P-0005.
+- **Supervision:** `health_monitor.py`'s restart logic (restarts a Service App after repeated failed health checks) → `Restart=on-failure` in systemd units. Delivered by P-0005 for process crashes; the health-based restart remains. Known limitation: the health monitor currently probes only Service Apps with `config.has_UI: true` (`health_monitor.py`).
+- **Logging:** Apps log to stdout/stderr; the platform routes that to journald on Linux (queryable on the system journal with `journalctl _SYSTEMD_USER_UNIT=latarnia-{env}-{app}.service`) or to a per-app log file on macOS dev. Largely delivered by P-0005.
 - **Reverse proxy:** `web_proxy.py` (custom async HTTP proxy with forwarded-headers logic) → Caddy site config per app, generated from the manifest. Deleted code: `web_proxy.py`, related tests, the `_build_forwarded_headers` helper.
 - **Two launcher paths:** the `ServiceManager` + `SubprocessLauncher` split remains (macOS dev still needs a fallback), but `/api/apps/{id}/process/*` can be fully deprecated in favor of `/api/services/{id}/*`.
 - **Parallel REST APIs:** collapse `/api/apps/{id}/process/*` and `/api/services/{id}/*` into one canonical lifecycle API.

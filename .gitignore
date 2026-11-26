@@ -236,3 +236,6 @@ logs/
 docs/local/
 # Deployment log (local operational record, not source code)
 DEPLOYMENTS.md
+
+# Claude Code task/scope worktrees (ClaudeCodeTemplate v1.3.0)
+.claude/worktrees/
